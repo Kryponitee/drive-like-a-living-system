@@ -1,0 +1,17 @@
+# DLS runtime / generated outputs
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.mypy_cache/
+*.log
+runs/
+outputs/
+checkpoints/
+demonstrations/
+assets/
+metadrive_assets/
+*.pt
+*.pth
+*.ckpt
+*.npz
