@@ -1,0 +1,65 @@
+name: DLS D0 server audit
+
+on:
+  push:
+    paths:
+      - .github/workflows/d0-server-audit.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  audit:
+    runs-on: [self-hosted, Linux, X64]
+    timeout-minutes: 10
+    steps:
+      - name: Audit server resources and verify external data mount
+        shell: bash
+        env:
+          DATA_ROOT: /mnt/datasets/lxb/dls
+        run: |
+          set -euo pipefail
+          echo "=== Compute ==="
+          uname -s -m
+          nproc
+          free -h
+          if command -v nvidia-smi >/dev/null 2>&1; then
+            nvidia-smi --query-gpu=index,name,memory.total --format=csv,noheader
+          else
+            echo "NVIDIA GPU tool not found"
+          fi
+
+          echo "=== Python ==="
+          command -v python3
+          python3 --version
+          if command -v conda >/dev/null 2>&1; then conda --version; fi
+          if command -v uv >/dev/null 2>&1; then uv --version; fi
+
+          echo "=== Data disk (must not be root filesystem) ==="
+          test -d /mnt/datasets/lxb
+          mount_target="$(findmnt -n -o TARGET -T /mnt/datasets/lxb)"
+          echo "Backing mount: $mount_target"
+          test "$mount_target" != "/"
+          mkdir -p "$DATA_ROOT"
+          test -w "$DATA_ROOT"
+          df -h "$DATA_ROOT"
+
+          echo "=== Python packages ==="
+          python3 - <<'PY'
+          import importlib.util
+          for module in ("torch", "metadrive", "numpy", "gymnasium"):
+              print(f"{module}: {'available' if importlib.util.find_spec(module) else 'not installed'}")
+          PY
+
+          {
+            echo "## DLS D0 server audit"
+            echo "- Data disk verified: \`$mount_target\` (not root filesystem)"
+            echo "- Data root: \`$DATA_ROOT\`"
+            echo "- Python: \`$(python3 --version 2>&1)\`"
+            echo "- CPU logical cores: \`$(nproc)\`"
+            if command -v nvidia-smi >/dev/null 2>&1; then
+              echo "- GPUs:"
+              nvidia-smi --query-gpu=name,memory.total --format=csv,noheader | sed 's/^/  - /'
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
