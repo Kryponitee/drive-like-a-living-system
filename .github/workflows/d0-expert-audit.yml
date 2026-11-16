@@ -1,0 +1,44 @@
+name: DLS D0 expert data audit
+
+on:
+  workflow_run:
+    workflows:
+      - DLS migrate three retired environments and bootstrap P0
+    types:
+      - completed
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  expert-audit:
+    if: github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success'
+    runs-on: [self-hosted, Linux, X64]
+    timeout-minutes: 25
+    env:
+      DLS_DATA_ROOT: /mnt/datasets/lxb/dls
+      PYTHONNOUSERSITE: "1"
+      XDG_CACHE_HOME: /mnt/datasets/lxb/dls/cache/xdg
+      TMPDIR: /mnt/datasets/lxb/dls/tmp
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verify data disk and DLS environment
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(findmnt -n -o TARGET -T "$DLS_DATA_ROOT")" = "/mnt/datasets"
+          test -x /home/ps/miniconda3/envs/dls-p0/bin/python
+          test -d "$DLS_DATA_ROOT/third_party/metadrive/metadrive/assets"
+
+      - name: Evaluate expert and save small structured demonstration probe
+        shell: bash
+        run: |
+          set -euo pipefail
+          /home/ps/miniconda3/envs/dls-p0/bin/python scripts/d0_expert_audit.py
+          {
+            echo "## DLS D0 expert audit"
+            echo "- Report: \`$DLS_DATA_ROOT/reports/d0/expert_audit.json\`"
+            echo "- Demonstrations: \`$DLS_DATA_ROOT/demonstrations/d0-expert-probe.npz\`"
+            echo "- No large training data generated; no D1 training started."
+          } >> "$GITHUB_STEP_SUMMARY"
