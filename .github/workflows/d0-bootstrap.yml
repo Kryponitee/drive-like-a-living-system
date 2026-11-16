@@ -1,0 +1,74 @@
+name: DLS D0 bootstrap and headless smoke
+
+on:
+  push:
+    paths:
+      - .github/workflows/d0-bootstrap.yml
+      - scripts/d0_smoke.py
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: dls-d0-bootstrap
+  cancel-in-progress: false
+
+jobs:
+  bootstrap:
+    runs-on: [self-hosted, Linux, X64]
+    timeout-minutes: 75
+    env:
+      DLS_DATA_ROOT: /mnt/datasets/lxb/dls
+      XDG_CACHE_HOME: /mnt/datasets/lxb/dls/cache/xdg
+      PIP_CACHE_DIR: /mnt/datasets/lxb/dls/cache/pip
+      MPLCONFIGDIR: /mnt/datasets/lxb/dls/cache/matplotlib
+      TMPDIR: /mnt/datasets/lxb/dls/tmp
+      PYTHONNOUSERSITE: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verify data disk, isolate environment and install MetaDrive
+        shell: bash
+        run: |
+          set -euo pipefail
+          mount_target="$(findmnt -n -o TARGET -T /mnt/datasets/lxb)"
+          test "$mount_target" != "/"
+          test -w "$DLS_DATA_ROOT"
+          mkdir -p "$PIP_CACHE_DIR" "$XDG_CACHE_HOME" "$MPLCONFIGDIR" "$TMPDIR" "$DLS_DATA_ROOT/envs" "$DLS_DATA_ROOT/third_party" "$DLS_DATA_ROOT/reports/d0"
+          avail_kb="$(df -Pk "$DLS_DATA_ROOT" | awk 'NR==2 {print $4}')"
+          test "$avail_kb" -gt 10485760
+
+          python_source=/home/ps/miniconda3/envs/py310/bin/python
+          test -x "$python_source"
+          "$python_source" --version
+          VENV="$DLS_DATA_ROOT/envs/p0"
+          if test ! -x "$VENV/bin/python"; then
+            "$python_source" -m venv "$VENV"
+          fi
+          "$VENV/bin/python" -m pip --version
+          "$VENV/bin/python" -m pip install --disable-pip-version-check --no-input --upgrade pip setuptools wheel
+
+          SRC="$DLS_DATA_ROOT/third_party/metadrive"
+          if test ! -d "$SRC/.git"; then
+            git clone --depth 1 --single-branch https://github.com/metadriverse/metadrive.git "$SRC"
+          fi
+          git -C "$SRC" rev-parse HEAD > "$DLS_DATA_ROOT/reports/d0/metadrive_commit.txt"
+          "$VENV/bin/python" -m pip install --disable-pip-version-check --no-input -e "$SRC"
+          cd "$GITHUB_WORKSPACE"
+          "$VENV/bin/python" -m metadrive.pull_asset
+          "$VENV/bin/python" -m pip freeze > "$DLS_DATA_ROOT/reports/d0/pip_freeze.txt"
+          echo "Environment installed under $VENV"
+          echo "MetaDrive git revision: $(cat "$DLS_DATA_ROOT/reports/d0/metadrive_commit.txt")"
+
+      - name: D0 simulator smoke test
+        shell: bash
+        run: |
+          set -euo pipefail
+          "$DLS_DATA_ROOT/envs/p0/bin/python" scripts/d0_smoke.py
+          {
+            echo "## DLS D0 bootstrap"
+            echo "- Result: structured-state headless simulation passed"
+            echo "- Environment and MetaDrive source: \`$DLS_DATA_ROOT\`"
+            echo "- Data report: \`$DLS_DATA_ROOT/reports/d0/smoke.json\`"
+            echo "- MetaDrive revision: \`$(cat "$DLS_DATA_ROOT/reports/d0/metadrive_commit.txt")\`"
+          } >> "$GITHUB_STEP_SUMMARY"
