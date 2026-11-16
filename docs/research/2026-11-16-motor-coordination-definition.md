@@ -13,19 +13,19 @@ Do **not** require a unique biological answer, a fixed number of discovered unit
 
 ## 2. Minimal external interface
 
-Let (s_t) be the physical state, (o_t) the observation, (g_t) the task/navigation condition, (z_t) a high-level coordination signal, (h_t) the motor system's latent internal state, and (u_t) the vehicle command:
+Let $s_t$ be the physical state, $o_t$ the observation, $g_t$ the task/navigation condition, $z_t$ a high-level coordination signal, $h_t$ the motor system's latent internal state, and $u_t$ the vehicle command:
 
-[
+$
 z_t=N_\theta(o_t,g_t,f_t),\qquad
 (h_{t+1},u_t)=C_\phi(h_t,s_t,z_t),\qquad
 s_{t+1}=F(s_t,u_t,\xi_t).
-]
+$
 
-(f_t) summarizes execution feedback. (F) describes vehicle/environment dynamics and perturbation (\xi_t).
+$f_t$ summarizes execution feedback. $F$ describes vehicle/environment dynamics and perturbation $\xi_t$.
 
-This interface specifies **two feedback timescales**, but neither fixes a GRU/DiT nor implies distinct motor units have been learned.
+This interface allows **hierarchical feedback** (with timescales to be defined), but neither fixes a GRU/DiT nor implies distinct motor units have been learned.
 
-The latent state (h_t) can implement learned interactions or modular dynamics, but no particular factorization of (h_t) is asserted at this stage.
+The latent state $h_t$ can implement learned interactions or modular dynamics, but no particular factorization of (h_t) is asserted at this stage.
 
 ## 3. Operational definition: what counts as meaningful coordination?
 
@@ -41,13 +41,13 @@ Merely obtaining low-dimensional states, attention weights, different-looking mo
 
 ### Task variables, not unique trajectories
 
-Let (q(s)) represent task-relevant quantities (e.g. clearance to collision, lateral position within drivable area, speed relative to a context-dependent requirement). Different motions can satisfy the same goal.
+Let $q(s)$ represent task-relevant quantities (e.g. clearance to collision, lateral position within drivable area, speed relative to a context-dependent requirement). Different motions can satisfy the same goal.
 
 A candidate controlled quantity is
 
-[
+$
 J_q(\pi;\mathcal D)=\mathbb E_{\mathcal D,\,\pi}\left[\sum_t \ell_q(q(s_t),g_t)\right],
-]
+$
 
 measured across context and disturbance distributions. This is an evaluation template, **not** a prescribed training reward or a formal safety guarantee.
 
