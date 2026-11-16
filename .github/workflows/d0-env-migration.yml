@@ -94,14 +94,17 @@ jobs:
           set -euo pipefail
           SRC="$DLS_DATA_ROOT/third_party/metadrive"
           mkdir -p "$DLS_DATA_ROOT/third_party"
-          if test ! -d "$SRC/.git"; then
-            if test -e "$SRC"; then
-              echo "Existing incomplete MetaDrive checkout, refusing to overwrite: $SRC"
-              exit 1
+          if test -d "$SRC/.git"; then
+            if ! git -C "$SRC" rev-parse --verify HEAD >/dev/null 2>&1; then
+              echo "Repairing only previously interrupted DLS MetaDrive checkout"
+              git -C "$SRC" fetch --depth 1 origin main
+              git -C "$SRC" reset --hard FETCH_HEAD
             fi
+          else
+            test ! -e "$SRC"
             git clone --depth 1 https://github.com/metadriverse/metadrive.git "$SRC"
           fi
-          git -C "$SRC" rev-parse HEAD | tee "$DLS_DATA_ROOT/reports/d0/metadrive_commit.txt"
+          git -C "$SRC" rev-parse --verify HEAD | tee "$DLS_DATA_ROOT/reports/d0/metadrive_commit.txt"
           "$DLS_ENV/bin/python" -m pip install --no-input --disable-pip-version-check -e "$SRC"
           "$DLS_ENV/bin/python" -m metadrive.pull_asset
           "$DLS_ENV/bin/python" -m pip freeze > "$DLS_DATA_ROOT/reports/d0/pip_freeze.txt"
