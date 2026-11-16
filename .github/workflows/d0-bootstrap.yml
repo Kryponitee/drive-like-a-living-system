@@ -1,10 +1,6 @@
 name: DLS D0 bootstrap and headless smoke
 
 on:
-  push:
-    paths:
-      - .github/workflows/d0-bootstrap.yml
-      - scripts/d0_smoke.py
   workflow_dispatch:
 
 permissions:
@@ -41,10 +37,8 @@ jobs:
           python_source=/home/ps/miniconda3/envs/py310/bin/python
           test -x "$python_source"
           "$python_source" --version
-          VENV="$DLS_DATA_ROOT/envs/p0"
-          if test ! -x "$VENV/bin/python"; then
-            "$python_source" -m venv "$VENV"
-          fi
+          VENV="/home/ps/miniconda3/envs/dls-p0"
+          test -x "$VENV/bin/python"
           "$VENV/bin/python" -m pip --version
           "$VENV/bin/python" -m pip install --disable-pip-version-check --no-input --upgrade pip setuptools wheel
 
