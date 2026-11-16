@@ -22,7 +22,6 @@ jobs:
       XDG_CACHE_HOME: /mnt/datasets/lxb/dls/cache/xdg
       TMPDIR: /mnt/datasets/lxb/dls/tmp
     steps:
-      - uses: actions/checkout@v4
       - name: Verify data disk and DLS environment
         shell: bash
         run: |
@@ -35,7 +34,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          /home/ps/miniconda3/envs/dls-p0/bin/python scripts/d0_expert_audit.py
+          curl -fsSL --connect-timeout 10 --max-time 90 "https://raw.githubusercontent.com/Kryponitee/drive-like-a-living-system/main/scripts/d0_expert_audit.py" -o "$TMPDIR/d0_expert_audit.py"
+          /home/ps/miniconda3/envs/dls-p0/bin/python "$TMPDIR/d0_expert_audit.py"
           {
             echo "## DLS D0 expert audit"
             echo "- Report: \`$DLS_DATA_ROOT/reports/d0/expert_audit.json\`"
