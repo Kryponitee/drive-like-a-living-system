@@ -19,7 +19,7 @@ env = MetaDriveEnv(
         "use_render": False,
         "image_observation": False,
         "traffic_density": 0.1,
-        "environment_num": 5,
+        "num_scenarios": 5,
         "start_seed": 0,
         "log_level": 50,
     }
