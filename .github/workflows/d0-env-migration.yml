@@ -30,7 +30,6 @@ jobs:
       PYTHONNOUSERSITE: "1"
       CONDA_SOLVER: classic
     steps:
-      - uses: actions/checkout@v4
       - name: Verify dedicated data disk, exact environment paths and activity
         shell: bash
         run: |
@@ -113,7 +112,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          "$DLS_ENV/bin/python" scripts/d0_smoke.py
+          curl -fsSL --connect-timeout 10 --max-time 90 "https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/${GITHUB_SHA}/scripts/d0_smoke.py" -o "$TMPDIR/d0_smoke.py"
+          "$DLS_ENV/bin/python" "$TMPDIR/d0_smoke.py"
 
       - name: Install PyTorch for subsequent DLS P0 training
         shell: bash
