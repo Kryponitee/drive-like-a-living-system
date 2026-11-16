@@ -1,0 +1,15 @@
+# DLS P0: server layout. These paths are deliberately separated.
+# Python environment lives on the system filesystem.
+python: /home/ps/miniconda3/envs/dls-p0/bin/python
+conda_prefix: /home/ps/miniconda3/envs/dls-p0
+
+# All persistent experiment data and large artifacts live on the data mount.
+data_root: /mnt/datasets/lxb/dls
+metadrive_source: /mnt/datasets/lxb/dls/third_party/metadrive
+demonstrations: /mnt/datasets/lxb/dls/demonstrations
+scenarios: /mnt/datasets/lxb/dls/scenarios
+checkpoints: /mnt/datasets/lxb/dls/checkpoints
+reports: /mnt/datasets/lxb/dls/reports
+cache: /mnt/datasets/lxb/dls/cache
+
+# For programmatic runs set DLS_DATA_ROOT=/mnt/datasets/lxb/dls.
