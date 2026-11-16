@@ -1,27 +1,30 @@
 # Drive Like a Living System (DLS)
 
-**Status:** research modeling / literature review (2026-11-16). No implementation or experimental claims.
+**Current stage: P0 research protocol defined (2026-11-16); no implementation or experimental results.**
 
 ## Research question
 
-Can reusable, feedback-responsive motor coordination emerge from end-to-end driving experience, and does it benefit closed-loop driving?
+Can learned, reusable motor coordination emerge from driving experience and improve hierarchical closed-loop feedback control?
 
-The goal is **not** to recover a unique biological muscle decomposition, pre-label driving skills, or assume that a modular network is a motor synergy.
+We **do not** prescribe driving-skill labels to internal units or assume that a modular architecture guarantees motor synergy.
 
-## Working principles
+## Active protocol
 
-- Hierarchical closed loop: a high-level neural policy conditions a lower-level adaptive motor controller.
-- Learn the internal coordination organization from data; do not prescribe units such as "steering muscle" or "yield module".
-- Multiple internal solutions for the same task are acceptable.
-- Define success by task-level stabilization, cross-context reuse, and causal evidence from internal interventions.
-- Compare against equally resourced unstructured policies; do not infer synergy from performance alone.
+**[P0 v1.0 — Learnable modular motor coordination with feedback and communication](docs/research/2026-11-16-P0-protocol-v1.md)**
 
-## Research records
+- **Environment:** MetaDrive structured observations (no camera/visual E2E in P0).
+- **High level N:** scene/navigation/feedback -> coordination conditioning.
+- **Low level C:** learned recurrent modules, soft routing, common action head, physical-state feedback.
+- **Main comparison:** modular controller with *only shared physical feedback* versus the same controller *with learnable direct inter-module communication*. Include a matched monolithic recurrent-policy baseline.
+- **Evidence requirements:** closed-loop competence, repeatable role/reuse, and causal feedback compensation under controlled perturbations.
+- **Status:** protocol only; D0 simulator/data audit is the next step, not yet executed.
 
-- [2026-11-16 — Minimal definition and related literature](docs/research/2026-11-16-motor-coordination-definition.md)
+## Previous records (retained for provenance)
 
-## Status
+- [001 — Minimal definition and literature](docs/research/2026-11-16-motor-coordination-definition.md)
+- [002 — Earlier sparse recurrent structure proposal](docs/research/2026-11-16-structure-proposal-v0.md)
+- [003 — Perception integration P0 -> P1 -> P2](docs/research/2026-11-16-perception-integration-v0.md)
+- [Earlier P0 sparse study draft (superseded as primary route)](docs/research/2026-11-16-P0-design-v0.md)
+- [Modular review + inter-module coupling discussion (incorporated into P0 v1)](docs/research/2026-11-16-P0-modular-review.md)
 
-Literature-backed modeling hypotheses only. No simulator selected, no motor-coordination architecture fixed, no code, no experiments.
-
-The separate MALT / ResLadder research results are not treated as evidence for DLS.
+The separate MALT / ResLadder research is not treated as evidence for DLS.
