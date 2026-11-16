@@ -60,3 +60,22 @@ bytes_per_transition = (256 + 256 + 2) * 4 = 2056 bytes
 - Sensors 射线检测：https://metadrive-simulator.readthedocs.io/en/latest/sensors.html
 
 **状态：只作资源与数据规划，不代表已完成 D0 试运行。**
+
+## 服务器路径约定修正（2026-11-16）
+
+用户依据既有 SMM 实验纠正：**数据区不在 `/home/ps/lxb` 下**。沿用以下历史绝对路径：
+
+- SMM 项目工作区：`/home/ps/lxb/workspace/stochastic-microstate-memory`
+- SMM self-hosted runner：`/home/ps/lxb/workspace/stochastic-microstate-memory/actions-runner`
+- 共享数据区根目录：**`/mnt/datasets/lxb`**
+- 既有 SMM 数据集：`/mnt/datasets/lxb/T-ImageNet200`
+- 既有 SMM checkpoint 根目录：`/mnt/datasets/lxb/smm_checkpoints`
+
+**建议 DLS 使用以下新路径（尚未在服务器验证或创建）：**
+
+- 仓库：`/home/ps/lxb/workspace/drive-like-a-living-system`
+- Runner：`/home/ps/lxb/workspace/drive-like-a-living-system/actions-runner`
+- DLS 数据区：`/mnt/datasets/lxb/dls`
+- 子目录：`metadrive_assets/`、`demonstrations/`、`scenarios/`、`checkpoints/`
+
+以上把「过去实验已确认的路径」和「DLS 尚未创建的建议路径」明确区分。实际 MetaDrive Python 包依赖/资源管理路径需要在 D0 审计后设置，不假设环境变量或固定资源目录已经生效。
