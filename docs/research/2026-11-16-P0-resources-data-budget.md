@@ -79,3 +79,18 @@ bytes_per_transition = (256 + 256 + 2) * 4 = 2056 bytes
 - 子目录：`metadrive_assets/`、`demonstrations/`、`scenarios/`、`checkpoints/`
 
 以上把「过去实验已确认的路径」和「DLS 尚未创建的建议路径」明确区分。实际 MetaDrive Python 包依赖/资源管理路径需要在 D0 审计后设置，不假设环境变量或固定资源目录已经生效。
+
+
+## 环境迁移决策（用户于 2026-11-16 授权）
+
+- **环境放在系统 Conda 区，不放在数据盘**：
+  `/home/ps/miniconda3/envs/dls-p0`。
+- 用户明确授权卸载以下三个历史 Conda 环境以释放系统盘空间：
+  `/home/ps/miniconda3/envs/lxb_ddpm-base`、
+  `/home/ps/miniconda3/envs/lxb_edm1`、
+  `/home/ps/miniconda3/envs/lxb_pmi-base`。
+- 只删除上述三个精确路径；如果检测到任何仍在使用的进程，停止操作。
+- 数据、仿真源代码与资源、专家示范、检查点、缓存等仍位于
+  `/mnt/datasets/lxb/dls`。
+- 对应自动部署工作流：[d0-env-migration.yml](../../.github/workflows/d0-env-migration.yml)。
+- 本节记录授权和预期路径，**不表示卸载或新环境创建已经完成**；以 GitHub Actions 任务结果为准。
