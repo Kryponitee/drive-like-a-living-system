@@ -1,0 +1,49 @@
+name: DLS D0 Python and connectivity discovery
+
+on:
+  push:
+    paths:
+      - .github/workflows/d0-runtime-discovery.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  discover:
+    runs-on: [self-hosted, Linux, X64]
+    timeout-minutes: 15
+    steps:
+      - name: Discover available Python environments and package sources
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "=== Python executables ==="
+          for candidate in python3.12 python3.11 python3.10 python3.9 python3.8; do
+            if command -v "$candidate" >/dev/null 2>&1; then
+              command -v "$candidate"
+              "$candidate" --version
+            fi
+          done
+          echo "=== Conda environments (classic solver) ==="
+          if command -v conda >/dev/null 2>&1; then
+            CONDA_SOLVER=classic conda env list || true
+            CONDA_SOLVER=classic conda info --base || true
+          fi
+          echo "=== Other likely env locations ==="
+          for root in /home/ps/lxb/miniconda3/envs /home/ps/lxb/anaconda3/envs /home/ps/lxb/.conda/envs /home/ps/.conda/envs /opt/conda/envs /home/ps/lxb/workspace; do
+            if test -d "$root"; then
+              echo "$root"
+              find "$root" -mindepth 1 -maxdepth 1 -type d -printf '  %f\n' | head -40
+            fi
+          done
+          echo "=== Network reachability (non-fatal) ==="
+          if command -v curl >/dev/null 2>&1; then
+            for url in https://github.com/metadriverse/metadrive https://pypi.org/simple/metadrive-simulator/; do
+              echo "$url"
+              curl -LIsS --max-time 10 -o /dev/null -w 'HTTP %{http_code}\n' "$url" || true
+            done
+          fi
+          echo "=== Disk ==="
+          df -h /home/ps/lxb/workspace /mnt/datasets/lxb/dls
+          du -sh /mnt/datasets/lxb/dls
