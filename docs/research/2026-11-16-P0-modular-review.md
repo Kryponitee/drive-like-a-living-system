@@ -1,3 +1,5 @@
+> **REVIEW INCORPORATED** into [P0 v1.0 modular coordination protocol](2026-11-16-P0-protocol-v1.md). This file preserves the questions and rationale; use v1 as the current protocol.
+
 # P0 方案审查补充：可学习模块化协调（待批准）
 
 日期：2026-11-16
