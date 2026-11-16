@@ -86,3 +86,8 @@ u_t = D(h_{t+1})
 如不同意，再对比「连续潜在动力系统（完全不做连接学习）」或「预设模块容量但学习门控/交互」两种路线。
 
 本文件只提交研究提案，不进入模型实现或实验。
+
+
+## Review update — 2026-11-16
+
+User **accepted v0 as a deliberately loose first-pass structure hypothesis**. This approves only the research direction (learned coordination organization instead of hand-labeled motor units). Specific topology, sparse training method, model, platform, and experiments remain undecided. A staged perception interface is proposed in [record 003](2026-11-16-perception-integration-v0.md) and awaits review.
