@@ -1,0 +1,150 @@
+name: DLS migrate three retired environments and bootstrap P0
+
+on:
+  push:
+    paths:
+      - .github/workflows/d0-env-migration.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# Supersede the previous data-disk venv bootstrap; it must not compete for storage.
+concurrency:
+  group: dls-d0-bootstrap
+  cancel-in-progress: true
+
+jobs:
+  migrate:
+    runs-on: [self-hosted, Linux, X64]
+    timeout-minutes: 90
+    env:
+      DLS_DATA_ROOT: /mnt/datasets/lxb/dls
+      DLS_ENV: /home/ps/miniconda3/envs/dls-p0
+      PIP_CACHE_DIR: /mnt/datasets/lxb/dls/cache/pip
+      CONDA_PKGS_DIRS: /mnt/datasets/lxb/dls/cache/conda-pkgs
+      XDG_CACHE_HOME: /mnt/datasets/lxb/dls/cache/xdg
+      MPLCONFIGDIR: /mnt/datasets/lxb/dls/cache/matplotlib
+      TMPDIR: /mnt/datasets/lxb/dls/tmp
+      TORCH_HOME: /mnt/datasets/lxb/dls/cache/torch
+      PYTHONNOUSERSITE: "1"
+      CONDA_SOLVER: classic
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verify dedicated data disk, exact environment paths and activity
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(findmnt -n -o TARGET -T "$DLS_DATA_ROOT")" = "/mnt/datasets"
+          mkdir -p "$PIP_CACHE_DIR" "$CONDA_PKGS_DIRS" "$XDG_CACHE_HOME" "$MPLCONFIGDIR" "$TMPDIR" "$TORCH_HOME" "$DLS_DATA_ROOT/reports/d0"
+          echo "=== Filesystem capacity ==="
+          df -h /home/ps/miniconda3/envs "$DLS_DATA_ROOT"
+          echo "=== Three authorized legacy environments ==="
+          for name in lxb_ddpm-base lxb_edm1 lxb_pmi-base; do
+            target="/home/ps/miniconda3/envs/$name"
+            if test -d "$target"; then
+              test ! -L "$target"
+              stat -c '%A %U:%G %n' "$target"
+              du -sh "$target"
+              for process in /proc/[0-9]*; do
+                for field in exe cwd; do
+                  resolved="$(readlink -f "$process/$field" 2>/dev/null || true)"
+                  case "$resolved" in
+                    "$target"|"$target"/*)
+                      echo "REFUSE: live process ${process##*/} uses $target ($field)"
+                      exit 1
+                      ;;
+                  esac
+                done
+              done
+            else
+              echo "$target: absent"
+            fi
+          done
+
+      - name: Remove only three explicitly authorized retired conda environments
+        shell: bash
+        run: |
+          set -euo pipefail
+          for name in lxb_ddpm-base lxb_edm1 lxb_pmi-base; do
+            target="/home/ps/miniconda3/envs/$name"
+            if test -d "$target"; then
+              /home/ps/miniconda3/bin/conda env remove --yes --prefix "$target"
+              test ! -e "$target"
+              echo "Removed: $target"
+            fi
+          done
+          echo "=== Root filesystem after authorized removals ==="
+          df -h /home/ps/miniconda3/envs
+
+      - name: Create dedicated dls-p0 conda environment on system disk
+        shell: bash
+        run: |
+          set -euo pipefail
+          if test ! -x "$DLS_ENV/bin/python"; then
+            /home/ps/miniconda3/bin/conda create --yes --prefix "$DLS_ENV" --solver classic python=3.10 pip
+          fi
+          "$DLS_ENV/bin/python" -V
+          "$DLS_ENV/bin/python" -m pip install --no-input --disable-pip-version-check --upgrade pip setuptools wheel
+          test "$(findmnt -n -o TARGET -T "$DLS_ENV")" = "/"
+
+      - name: Install MetaDrive in dedicated environment with assets on data disk
+        shell: bash
+        run: |
+          set -euo pipefail
+          SRC="$DLS_DATA_ROOT/third_party/metadrive"
+          mkdir -p "$DLS_DATA_ROOT/third_party"
+          if test ! -d "$SRC/.git"; then
+            if test -e "$SRC"; then
+              echo "Existing incomplete MetaDrive checkout, refusing to overwrite: $SRC"
+              exit 1
+            fi
+            git clone --depth 1 https://github.com/metadriverse/metadrive.git "$SRC"
+          fi
+          git -C "$SRC" rev-parse HEAD | tee "$DLS_DATA_ROOT/reports/d0/metadrive_commit.txt"
+          "$DLS_ENV/bin/python" -m pip install --no-input --disable-pip-version-check -e "$SRC"
+          "$DLS_ENV/bin/python" -m metadrive.pull_asset
+          "$DLS_ENV/bin/python" -m pip freeze > "$DLS_DATA_ROOT/reports/d0/pip_freeze.txt"
+
+      - name: Run headless MetaDrive D0 smoke test
+        shell: bash
+        run: |
+          set -euo pipefail
+          "$DLS_ENV/bin/python" scripts/d0_smoke.py
+
+      - name: Install PyTorch for subsequent DLS P0 training
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "=== Root space before torch ==="
+          df -h /home/ps/miniconda3/envs
+          root_avail_kb="$(df -Pk /home/ps/miniconda3/envs | awk 'NR==2 {print $4}')"
+          test "$root_avail_kb" -gt 15728640
+          "$DLS_ENV/bin/python" -m pip install --no-input --disable-pip-version-check 'torch==2.5.1' 'tensorboard>=2.15,<3'
+          "$DLS_ENV/bin/python" - <<'PY'
+          import torch
+          print("torch:", torch.__version__)
+          print("cuda_available:", torch.cuda.is_available())
+          if torch.cuda.is_available():
+              print("gpu:", torch.cuda.get_device_name(0))
+          PY
+          "$DLS_ENV/bin/python" -m pip freeze > "$DLS_DATA_ROOT/reports/d0/pip_freeze.txt"
+
+      - name: Remove obsolete DLS-only venv from data disk
+        shell: bash
+        run: |
+          set -euo pipefail
+          obsolete="$DLS_DATA_ROOT/envs/p0"
+          test "$obsolete" = "/mnt/datasets/lxb/dls/envs/p0"
+          if test -d "$obsolete"; then
+            rm -rf -- "$obsolete"
+            echo "Removed only obsolete DLS data-disk virtual environment"
+          fi
+          df -h /home/ps/miniconda3/envs "$DLS_DATA_ROOT"
+          {
+            echo "## DLS P0 environment migrated"
+            echo "- Removed only \`lxb_ddpm-base\`, \`lxb_edm1\`, \`lxb_pmi-base\` (if present and inactive)"
+            echo "- Conda: \`$DLS_ENV\` (system disk)"
+            echo "- MetaDrive source/assets/data: \`$DLS_DATA_ROOT\` (dedicated data disk)"
+            echo "- D0 smoke: PASS"
+          } >> "$GITHUB_STEP_SUMMARY"
