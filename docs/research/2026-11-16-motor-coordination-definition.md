@@ -106,3 +106,15 @@ Choose the **smallest learnable structure hypothesis class**, rather than hand d
 Decision criterion: which choice admits meaningful intervention + reuse tests while minimizing hand-specified semantics and excessive complexity?
 
 No software stack, module count, training algorithm, test benchmark, or simulator is selected by this record.
+
+
+## Addendum — Data-driven *structure* learning is an established field (2026-11-16)
+
+Correction to overly restrictive earlier framing: DLS does **not** have to pre-create eight separate GRUs or hand-assign neural modules. There are several different things described as structure learning:
+
+1. **Architecture/topology growth** — NEAT evolves neural nodes and connections (Stanley & Miikkulainen, 2002). This searches topology with evolutionary optimization, not necessarily gradient learning in an end-to-end driving stack. https://pubmed.ncbi.nlm.nih.gov/12180173/
+2. **Adaptive neural wiring** — RigL changes which sparse parameter connections exist using weight magnitudes and gradients during training (Evci et al., ICML 2020). This learns connectivity but does **not** by itself reveal distinct semantic motor skills. https://proceedings.mlr.press/v119/evci20a.html
+3. **Latent interaction structure** — NRI infers a latent interaction graph and dynamics from unlabelled observations (Kipf et al., ICML 2018). It presupposes a set of entities/nodes; it does not create all entities ex nihilo. https://proceedings.mlr.press/v80/kipf18a.html
+4. **Emergent functional motor coordination** — Li & Hayashibe, *Motor synergy and energy efficiency emerge in whole-body locomotion learning* (Scientific Reports, **published January 3, 2025**) observed low-dimensional synergy patterns in a trained 28-DoF locomotion policy without explicitly rewarding synergy; results assessed via PCA of joint torques. **Crucial limit:** low-dimensional *output* coordination does not prove that identifiable *internal network modules* spontaneously formed. https://www.nature.com/articles/s41598-024-82472-x
+
+**DLS modeling consequence:** separate (a) learned neural wiring/architecture, (b) emergent latent functional decomposition, and (c) demonstrable task-level feedback coordination. None alone implies the others. A valid initial approach is to train an unconstrained recurrent controller, investigate functional coordination, and only add graph/topology learning if a testable need is established. No choice of a specific architecture or experiment is committed by this addendum.
