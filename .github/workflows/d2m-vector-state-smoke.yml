@@ -1,0 +1,111 @@
+name: DLS D2m custom A B C vectorized recurrent clock correctness
+
+on:
+  push:
+    paths:
+      - .github/workflows/d2m-vector-state-smoke.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: dls-d2m-vector-state
+  cancel-in-progress: false
+
+jobs:
+  validate:
+    runs-on: [self-hosted, Linux, X64]
+    timeout-minutes: 12
+    env:
+      DLS_DATA_ROOT: /mnt/datasets/lxb/dls
+      DLS_ENV: /home/ps/miniconda3/envs/dls-p0
+      TMPDIR: /mnt/datasets/lxb/dls/tmp
+      PYTHONNOUSERSITE: "1"
+      XDG_CACHE_HOME: /mnt/datasets/lxb/dls/cache/xdg
+      OMP_NUM_THREADS: "1"
+      OPENBLAS_NUM_THREADS: "1"
+      MKL_NUM_THREADS: "1"
+      NUMEXPR_NUM_THREADS: "1"
+    steps:
+      - name: Reuse frozen original A B C BC models and torch with no extra dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(findmnt -n -o TARGET -T "$DLS_DATA_ROOT")" = "/mnt/datasets"
+          test "$(findmnt -n -o TARGET -T "$DLS_ENV")" = "/"
+          test -x "$DLS_ENV/bin/python"
+          for variant in A B C; do
+            test -f "$DLS_DATA_ROOT/checkpoints/d1-v1/$variant-seed42.pt"
+          done
+          test ! -e "$DLS_DATA_ROOT/reports/d2m/vector-state-summary.json"
+          mkdir -p "$TMPDIR" "$DLS_DATA_ROOT/reports/d2m"
+          for variant in A B C; do
+            sha256sum "$DLS_DATA_ROOT/checkpoints/d1-v1/$variant-seed42.pt"
+          done > "$DLS_DATA_ROOT/reports/d2m/frozen-BC-sha256-before.txt"
+          "$DLS_ENV/bin/python" - <<'PY'
+          import torch
+          assert torch.__version__.startswith("2.5.1")
+          print("D2m isolated native torch CPU:",torch.__version__)
+          PY
+
+      - name: Download exact version of original controller and only new async state adapter/test
+        shell: bash
+        run: |
+          set -euo pipefail
+          for item in "src/dls_p0.py:dls_p0.py" \
+                      "src/dls_recurrent_ppo.py:dls_recurrent_ppo.py" \
+                      "src/dls_vector_state_adapter.py:dls_vector_state_adapter.py" \
+                      "scripts/d2m_vector_state_smoke.py:d2m_vector_test.py"; do
+            SRC="${item%%:*}"
+            TARGET="${item#*:}"
+            RAW="https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/${GITHUB_SHA}/$SRC"
+            OK=0
+            for URL in "https://gh-proxy.com/$RAW" "https://ghproxy.net/$RAW" "$RAW"; do
+              if curl -fLsS --connect-timeout 10 --max-time 60 "$URL" -o "$TMPDIR/$TARGET"; then
+                OK=1
+                break
+              fi
+            done
+            test "$OK" = 1
+            "$DLS_ENV/bin/python" -m py_compile "$TMPDIR/$TARGET"
+            sha256sum "$TMPDIR/$TARGET"
+          done
+
+      - name: Verify per-env slow-clock, episode resets, state round-trip, gradients, logprob replay
+        shell: bash
+        run: |
+          set -euo pipefail
+          "$DLS_ENV/bin/python" "$TMPDIR/d2m_vector_test.py"
+          "$DLS_ENV/bin/python" - <<'PY'
+          import json
+          from pathlib import Path
+          d=Path("/mnt/datasets/lxb/dls/reports/d2m")
+          report=json.loads((d/"vector-state-summary.json").read_text())
+          assert report["passed_actor_states_and_probabilities"]
+          assert report["does_not_establish_Sb3_native_custom_policy_integration"]
+          for variant,r in report["models"].items():
+              assert r["ticks"]==37 and r["num_async_envs_tested"]==48
+              assert r["phases_covered"]==list(range(5))
+              for k in ("max_action_error_batched_vs_single",
+                        "max_hidden_error_batched_vs_single",
+                        "max_slow_error_batched_vs_single",
+                        "max_old_policy_ratio_replay_error"):
+                  assert r[k]<3e-5,(variant,k,r[k])
+              assert r["differentiable_actor_grad_norm_L1"]>0
+          assert report["models"]["B"]["original_actor_trainable_params"]==report["models"]["C"]["original_actor_trainable_params"]
+          print("PASS asynchronous state + recurrent gradient boundary across A/B/C")
+          PY
+          for variant in A B C; do
+            sha256sum "$DLS_DATA_ROOT/checkpoints/d1-v1/$variant-seed42.pt"
+          done > "$DLS_DATA_ROOT/reports/d2m/frozen-BC-sha256-after.txt"
+          cmp "$DLS_DATA_ROOT/reports/d2m/frozen-BC-sha256-before.txt" "$DLS_DATA_ROOT/reports/d2m/frozen-BC-sha256-after.txt"
+          {
+            echo "## D2m A/B/C vectorized state adapter correctness"
+            echo "- 48 asynchronous environments x 37 ticks per model; 5 independent phase values"
+            echo "- Exact original single-environment action, hidden state and slow-state semantics"
+            echo "- State flatten/unflatten, PPO probability replay, differentiable recurrence gradients"
+            echo "- Frozen BC source checkpoint SHA-256 unchanged, no MetaDrive or PPO updates"
+            echo "- Summary: \`$DLS_DATA_ROOT/reports/d2m/vector-state-summary.json\`"
+            echo "- Still needs mature recurrent-buffer policy integration before D2n training"
+          } >> "$GITHUB_STEP_SUMMARY"
