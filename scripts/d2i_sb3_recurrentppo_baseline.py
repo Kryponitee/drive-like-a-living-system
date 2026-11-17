@@ -22,7 +22,7 @@ ROOT = Path("/mnt/datasets/lxb/dls")
 ENV_STEPS = 16_384
 TRAIN_DENSITY = 0.1
 TRAIN_SEED = 5000
-EVAL_SEEDS = list(range(5200, 5212))
+EVAL_SEEDS = list(range(5400, 5412))
 N_ENVS = 4
 
 
