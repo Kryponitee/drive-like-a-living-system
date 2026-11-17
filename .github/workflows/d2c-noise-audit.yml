@@ -1,0 +1,135 @@
+name: DLS D2c frozen-policy exploration-noise diagnostic
+
+on:
+  push:
+    paths:
+      - .github/workflows/d2c-noise-audit.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: dls-d2c-noise
+  cancel-in-progress: false
+
+jobs:
+  diagnose:
+    runs-on: [self-hosted, Linux, X64]
+    timeout-minutes: 30
+    env:
+      DLS_DATA_ROOT: /mnt/datasets/lxb/dls
+      DLS_ENV: /home/ps/miniconda3/envs/dls-p0
+      TMPDIR: /mnt/datasets/lxb/dls/tmp
+      XDG_CACHE_HOME: /mnt/datasets/lxb/dls/cache/xdg
+      PYTHONNOUSERSITE: "1"
+      OMP_NUM_THREADS: "1"
+      OPENBLAS_NUM_THREADS: "1"
+      MKL_NUM_THREADS: "1"
+      NUMEXPR_NUM_THREADS: "1"
+    steps:
+      - name: Check prior D2b, frozen BC checkpoint, and data disk
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(findmnt -n -o TARGET -T "$DLS_DATA_ROOT")" = "/mnt/datasets"
+          test -f "$DLS_DATA_ROOT/reports/d2b/d2b-summary.json"
+          for variant in A B C; do
+            test -f "$DLS_DATA_ROOT/checkpoints/d1-v1/$variant-seed42.pt"
+          done
+          mkdir -p "$TMPDIR" "$DLS_DATA_ROOT/reports/d2c/logs"
+          test "$(df -Pk "$DLS_DATA_ROOT" | awk 'NR==2 {print $4}')" -gt 10485760
+
+      - name: Reuse current PyTorch and MetaDrive and fetch exact model and diagnostic source
+        shell: bash
+        run: |
+          set -euo pipefail
+          for item in "src/dls_p0.py:dls_p0.py" "scripts/d2c_exploration_noise_audit.py:d2c_noise.py"; do
+            SRC="${item%%:*}"
+            TARGET="${item#*:}"
+            RAW="https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/${GITHUB_SHA}/$SRC"
+            OK=0
+            for URL in "https://gh-proxy.com/$RAW" "https://ghproxy.net/$RAW" "$RAW"; do
+              if curl -fLsS --connect-timeout 10 --max-time 60 "$URL" -o "$TMPDIR/$TARGET"; then
+                OK=1
+                break
+              fi
+            done
+            test "$OK" -eq 1
+            "$DLS_ENV/bin/python" -m py_compile "$TMPDIR/$TARGET"
+            sha256sum "$TMPDIR/$TARGET"
+          done
+
+      - name: Run 12 frozen-policy paired-condition simulator jobs concurrently
+        shell: bash
+        run: |
+          set -euo pipefail
+          declare -a PIDS=()
+          declare -a NAMES=()
+          for variant in A B C; do
+            for sigma in 0.00 0.05 0.10 0.27; do
+              name="$variant-sigma$sigma"
+              "$DLS_ENV/bin/python" "$TMPDIR/d2c_noise.py" --variant "$variant" --sigma "$sigma" \
+                > "$DLS_DATA_ROOT/reports/d2c/logs/$name.log" 2>&1 &
+              PIDS+=("$!")
+              NAMES+=("$name")
+            done
+          done
+          test "${#PIDS[@]}" = 12
+          FAILED=0
+          for i in "${!PIDS[@]}"; do
+            if wait "${PIDS[$i]}"; then
+              echo "PASS ${NAMES[$i]}"
+              grep -E '"success"|"collisions"|"mean_abs_steer_change"|"out_of_road"' "$DLS_DATA_ROOT/reports/d2c/logs/${NAMES[$i]}.log" | tail -4
+            else
+              echo "FAIL ${NAMES[$i]}"
+              tail -50 "$DLS_DATA_ROOT/reports/d2c/logs/${NAMES[$i]}.log"
+              FAILED=1
+            fi
+          done
+          test "$FAILED" -eq 0
+
+      - name: Summarize noise sensitivity, with full per-episode evidence retained on data disk
+        shell: bash
+        run: |
+          set -euo pipefail
+          "$DLS_ENV/bin/python" - <<'PY'
+          import json
+          from pathlib import Path
+          root=Path("/mnt/datasets/lxb/dls/reports/d2c")
+          sigmas=(0.,0.05,0.10,0.27)
+          summary={"stage":"D2c frozen-BC Gaussian pre-tanh noise sensitivity",
+                   "new_scenario_seeds":list(range(4200,4224)),
+                   "train_density":0.1,
+                   "changed_factor":"Only sigma; no training or model modifications",
+                   "models":{}}
+          for variant in "ABC":
+              rows=[]
+              for sigma in sigmas:
+                  r=json.loads((root/f"noise-{variant}-sigma{sigma:.2f}.json").read_text())
+                  assert r["pre_tanh_sigma"]==sigma
+                  assert r["held_out_scenarios"]==list(range(4200,4224))
+                  assert len(r["episodes"])==24
+                  rows.append({
+                      "sigma":sigma,
+                      "success":r["success"],
+                      "collision":r["collisions"],
+                      "out_of_road":r["out_of_road"],
+                      "mean_route_completion":r["mean_route_completion"],
+                      "mean_abs_steer_change":r["mean_abs_steer_change"],
+                      "mean_abs_pedal_change":r["mean_abs_pedal_change"],
+                      "reward_mean":r["reward_mean"],
+                  })
+              summary["models"][variant]=rows
+              print(variant,[(r["sigma"],r["success"],r["collision"],round(r["mean_abs_steer_change"],3)) for r in rows])
+          out=root/"d2c-summary.json"
+          assert not out.exists()
+          out.write_text(json.dumps(summary,ensure_ascii=False,indent=2),encoding="utf-8")
+          PY
+          {
+            echo "## D2c frozen BC noise intervention"
+            echo "- 3 models x 4 noise levels, 24 held-out seeds, all no training"
+            echo "- Noise matched in pre-tanh coordinates to D2b PPO"
+            echo "- All samples and old D2b weights preserved on data disk"
+            echo "- Report: \`$DLS_DATA_ROOT/reports/d2c/d2c-summary.json\`"
+          } >> "$GITHUB_STEP_SUMMARY"
