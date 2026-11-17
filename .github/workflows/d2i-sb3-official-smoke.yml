@@ -4,6 +4,7 @@ on:
   push:
     paths:
       - .github/workflows/d2i-sb3-official-smoke.yml
+      - scripts/d2i_sb3_recurrentppo_baseline.py
   workflow_dispatch:
 
 permissions:
