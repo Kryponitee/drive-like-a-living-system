@@ -1,0 +1,257 @@
+name: DLS D2f frozen-BC functional anchor PPO
+
+on:
+  push:
+    paths:
+      - .github/workflows/d2f-bc-anchor-ppo.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: dls-d2f-bc-anchor
+  cancel-in-progress: false
+
+jobs:
+  anchored_ppo:
+    runs-on: [self-hosted, Linux, X64]
+    timeout-minutes: 90
+    env:
+      DLS_DATA_ROOT: /mnt/datasets/lxb/dls
+      DLS_ENV: /home/ps/miniconda3/envs/dls-p0
+      TMPDIR: /mnt/datasets/lxb/dls/tmp
+      XDG_CACHE_HOME: /mnt/datasets/lxb/dls/cache/xdg
+      PYTHONNOUSERSITE: "1"
+      OMP_NUM_THREADS: "1"
+      OPENBLAS_NUM_THREADS: "1"
+      MKL_NUM_THREADS: "1"
+      NUMEXPR_NUM_THREADS: "1"
+      DLS_D2_TRAINING: "1"
+    steps:
+      - name: Verify data disk, original BC and D2d controls
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(findmnt -n -o TARGET -T "$DLS_DATA_ROOT")" = "/mnt/datasets"
+          test "$(findmnt -n -o TARGET -T "$DLS_ENV")" = "/"
+          test -f "$DLS_DATA_ROOT/reports/d2e/d2e-objective-diagnostic.json"
+          test -f "$DLS_DATA_ROOT/reports/d2d/d2d-summary.json"
+          for variant in A B C; do
+            test -f "$DLS_DATA_ROOT/checkpoints/d1-v1/$variant-seed42.pt"
+            test -f "$DLS_DATA_ROOT/checkpoints/d2d-v1/$variant-seed42.pt"
+          done
+          "$DLS_ENV/bin/python" -c 'import torch; assert torch.cuda.device_count() >= 3'
+          test "$(df -Pk "$DLS_DATA_ROOT" | awk 'NR==2 {print $4}')" -gt 10485760
+          mkdir -p "$TMPDIR" "$DLS_DATA_ROOT/reports/d2f/train-logs" "$DLS_DATA_ROOT/reports/d2f/eval-logs" "$DLS_DATA_ROOT/checkpoints/d2f-v1"
+          df -h "$DLS_DATA_ROOT"
+
+      - name: Fetch anchored trainer, paired evaluator, immutable model and data sampler
+        shell: bash
+        run: |
+          set -euo pipefail
+          for item in "src/dls_p0.py:dls_p0.py" \
+                      "src/dls_recurrent_ppo.py:dls_recurrent_ppo.py" \
+                      "src/dls_bc_anchor.py:dls_bc_anchor.py" \
+                      "scripts/d2f_train_bc_anchor.py:d2f_train.py" \
+                      "scripts/d2f_eval.py:d2f_eval.py" \
+                      "scripts/d2f_validation.py:d2f_validation.py"; do
+            SRC="${item%%:*}"
+            TARGET="${item#*:}"
+            RAW="https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/${GITHUB_SHA}/$SRC"
+            OK=0
+            for URL in "https://gh-proxy.com/$RAW" "https://ghproxy.net/$RAW" "$RAW"; do
+              if curl -fLsS --connect-timeout 10 --max-time 60 "$URL" -o "$TMPDIR/$TARGET"; then
+                OK=1
+                break
+              fi
+            done
+            test "$OK" -eq 1
+            "$DLS_ENV/bin/python" -m py_compile "$TMPDIR/$TARGET"
+            sha256sum "$TMPDIR/$TARGET"
+          done
+
+      - name: Verify functional-anchor zero loss before any policy update
+        shell: bash
+        run: |
+          set -euo pipefail
+          "$DLS_ENV/bin/python" - <<'PY'
+          import os,sys,copy
+          import numpy as np
+          import torch
+          sys.path.insert(0,os.environ["TMPDIR"])
+          from dls_p0 import model_info, run_sequence, nparams
+          from dls_bc_anchor import FrozenBCAnchorBatches
+          torch.set_num_threads(1)
+          root="/mnt/datasets/lxb/dls"
+          for variant in "ABC":
+              checkpoint=torch.load(f"{root}/checkpoints/d1-v1/{variant}-seed42.pt",weights_only=False,map_location="cpu")
+              model,_=model_info(variant)
+              model.load_state_dict(checkpoint["state_dict"],strict=True)
+              reference=copy.deepcopy(model).eval().requires_grad_(False)
+              sampler=FrozenBCAnchorBatches(__import__("pathlib").Path(root),
+                       checkpoint["train_mean"],checkpoint["train_std"],seed=1957)
+              x,m=sampler.sample(2,torch.device("cpu"))
+              with torch.no_grad():
+                  a=run_sequence(model,x)
+                  b=run_sequence(reference,x)
+              assert a.shape==b.shape==(2,40,2)
+              assert torch.equal(a,b)
+              assert m.sum()>0
+              print(variant,"BC anchor references identical, dataset steps:",sampler.steps)
+          PY
+
+      - name: Train A B C in parallel using 3 GPUs with exactly 4096 environment steps
+        shell: bash
+        run: |
+          set -euo pipefail
+          declare -a PIDS=()
+          declare -a NAMES=(A B C)
+          for gpu in 0 1 2; do
+            variant="${NAMES[$gpu]}"
+            "$DLS_ENV/bin/python" "$TMPDIR/d2f_train.py" \
+              --variant "$variant" --model-seed 42 --gpu "$gpu" \
+              --env-steps 4096 --rollout 128 \
+              > "$DLS_DATA_ROOT/reports/d2f/train-logs/$variant.log" 2>&1 &
+            PIDS+=("$!")
+          done
+          failed=0
+          for i in "${!PIDS[@]}"; do
+            variant="${NAMES[$i]}"
+            if wait "${PIDS[$i]}"; then
+              echo "PASS D2f train $variant"
+              tail -24 "$DLS_DATA_ROOT/reports/d2f/train-logs/$variant.log"
+            else
+              echo "FAIL D2f train $variant"
+              tail -90 "$DLS_DATA_ROOT/reports/d2f/train-logs/$variant.log"
+              failed=1
+            fi
+          done
+          test "$failed" -eq 0
+
+      - name: Paired closed-loop BC D2d D2f and expert on unseen seeds 4400 to 4423
+        shell: bash
+        run: |
+          set -euo pipefail
+          declare -a PIDS=()
+          declare -a NAMES=()
+          for phase in bc d2d d2f expert; do
+            if test "$phase" = expert; then
+              VARIANTS=(expert)
+            else
+              VARIANTS=(A B C)
+            fi
+            for variant in "${VARIANTS[@]}"; do
+              for density in 0.00 0.10 0.25; do
+                name="$phase-$variant-density$density"
+                "$DLS_ENV/bin/python" "$TMPDIR/d2f_eval.py" \
+                  --phase "$phase" --variant "$variant" --density "$density" \
+                  > "$DLS_DATA_ROOT/reports/d2f/eval-logs/$name.log" 2>&1 &
+                PIDS+=("$!")
+                NAMES+=("$name")
+              done
+            done
+          done
+          test "${#PIDS[@]}" -eq 30
+          failed=0
+          for i in "${!PIDS[@]}"; do
+            if wait "${PIDS[$i]}"; then
+              echo "PASS eval ${NAMES[$i]}"
+              grep 'success=' "$DLS_DATA_ROOT/reports/d2f/eval-logs/${NAMES[$i]}.log" | tail -1
+            else
+              echo "FAIL eval ${NAMES[$i]}"
+              tail -80 "$DLS_DATA_ROOT/reports/d2f/eval-logs/${NAMES[$i]}.log"
+              failed=1
+            fi
+          done
+          test "$failed" -eq 0
+
+      - name: Evaluate expert-action retention on independent 9822-step BC validation set
+        shell: bash
+        run: |
+          set -euo pipefail
+          "$DLS_ENV/bin/python" "$TMPDIR/d2f_validation.py"
+          test -s "$DLS_DATA_ROOT/reports/d2f/d2f-validation-drift.json"
+
+      - name: Audit paired success and rewards without assuming independence
+        shell: bash
+        run: |
+          set -euo pipefail
+          "$DLS_ENV/bin/python" - <<'PY'
+          import json
+          from pathlib import Path
+          root=Path("/mnt/datasets/lxb/dls/reports/d2f")
+          result={
+              "stage":"D2f fixed lambda=10 BC action functional anchor; 4096 environment steps",
+              "sigma":0.05,
+              "anchor_lambda":10.0,
+              "anchor_batch_sequences":16,
+              "anchor_sequence_length":40,
+              "train_model_seed":42,
+              "new_eval_scenes":list(range(4400,4424)),
+              "densities":[0.0,0.1,0.25],
+              "single_model_seed":True,
+              "models":{},
+              "expert":{},
+          }
+          def load(phase,v,d):
+              x=json.loads((root/f"eval-{phase}-{v}-density{d:.2f}.json").read_text())
+              assert x["seeds"] == list(range(4400,4424))
+              assert x["traffic_density"]==d and len(x["episodes"])==24
+              return x
+          valid=json.loads((root/"d2f-validation-drift.json").read_text())["models"]
+          for v in "ABC":
+              train=json.loads((root/f"train-{v}-seed42.json").read_text())
+              assert train["environment_steps"]==4096 and train["updates"]==32
+              assert train["anchor_lambda"]==10.0 and train["initial_exploration_sigma"]==0.05
+              assert train["max_ppo_behavior_replay_error"]<3e-5
+              model={
+                  "successful_training_episodes":train["num_successful_completed_training_episodes"],
+                  "avg_anchor_mse":train["mean_anchor_mse_last_epoch"],
+                  "validation_Huber":valid[v],
+                  "by_density":{},
+              }
+              for density in (0.0,0.1,0.25):
+                  controls={p:load(p,v,density) for p in ("bc","d2d","d2f")}
+                  base=controls["bc"]
+                  out={}
+                  for phase,o in controls.items():
+                      assert [r["seed"] for r in o["episodes"]]==[r["seed"] for r in base["episodes"]]
+                      out[phase]={
+                          "success":o["success"],
+                          "collision":o["collision"],
+                          "offroad":o["offroad"],
+                          "timeout":o["timeout"],
+                          "mean_reward":o["mean_reward"],
+                          "mean_completion":o["mean_completion"],
+                          "net_success_relative_BC":o["success"]-base["success"],
+                      }
+                  model["by_density"][str(density)]=out
+              result["models"][v]=model
+              print(v,"train success",model["successful_training_episodes"],
+                    "validation Huber BC/D2d/D2f",
+                    *(round(model["validation_Huber"][phase]["Huber"],6) for phase in ("bc","d2d","d2f")))
+              for density,rows in model["by_density"].items():
+                  print(v,density,"BC/D2d/D2f success",
+                        *(rows[phase]["success"] for phase in ("bc","d2d","d2f")),
+                        "reward",
+                        *(round(rows[phase]["mean_reward"],2) for phase in ("bc","d2d","d2f")))
+          for density in (0.0,0.1,0.25):
+              exp=load("expert","expert",density)
+              result["expert"][str(density)]={
+                  "success":exp["success"],"collision":exp["collision"],"offroad":exp["offroad"]
+              }
+          out=root/"d2f-summary.json"
+          assert not out.exists()
+          out.write_text(json.dumps(result,ensure_ascii=False,indent=2),encoding="utf-8")
+          print("Expert",result["expert"])
+          PY
+          {
+            echo "## D2f BC functional anchor result"
+            echo "- 3 GPU 4096-step trainings from original BC seed 42, same D2d optimizer"
+            echo "- Only new factor: lambda 10 BC action anchor from 16x40 cached expert transitions"
+            echo "- 30 CPU simulator processes for unseen seeds 4400..4423, all densities paired"
+            echo "- 9822 independent validation steps for functional-retention audit"
+            echo "- Summary: \`$DLS_DATA_ROOT/reports/d2f/d2f-summary.json\`"
+            echo "- No new expert demonstration or conda setup; all results on data disk"
+          } >> "$GITHUB_STEP_SUMMARY"
