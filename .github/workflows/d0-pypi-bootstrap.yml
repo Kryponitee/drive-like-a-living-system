@@ -11,7 +11,7 @@ permissions:
 
 concurrency:
   group: dls-pypi-bootstrap
-  cancel-in-progress: false
+  cancel-in-progress: true
 
 jobs:
   bootstrap:
