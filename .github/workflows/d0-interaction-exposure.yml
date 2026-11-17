@@ -1,0 +1,47 @@
+name: DLS D0d semantic interaction exposure
+
+on:
+  push:
+    paths:
+      - .github/workflows/d0-interaction-exposure.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  audit:
+    runs-on: [self-hosted, Linux, X64]
+    timeout-minutes: 20
+    env:
+      DLS_DATA_ROOT: /mnt/datasets/lxb/dls
+      DLS_ENV: /home/ps/miniconda3/envs/dls-p0
+      TMPDIR: /mnt/datasets/lxb/dls/tmp
+      PYTHONNOUSERSITE: "1"
+    steps:
+      - name: Validate existing setup and isolated external storage
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(findmnt -n -o TARGET -T "$DLS_DATA_ROOT")" = "/mnt/datasets"
+          test -x "$DLS_ENV/bin/python"
+          test -f "$DLS_DATA_ROOT/metadrive_assets/version.txt"
+          test -f "$DLS_DATA_ROOT/reports/d0/expert_traffic_coverage.json"
+          mkdir -p "$TMPDIR" "$DLS_DATA_ROOT/reports/d0"
+
+      - name: Quantify expert exposure to actual traffic in 12 paired seeds
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl -fsSL --connect-timeout 10 --max-time 90 \
+            "https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/${GITHUB_SHA}/scripts/d0_interaction_exposure.py" \
+            -o "$TMPDIR/d0_interaction_exposure.py"
+          "$DLS_ENV/bin/python" "$TMPDIR/d0_interaction_exposure.py"
+          test -f "$DLS_DATA_ROOT/reports/d0/expert_interaction_exposure.json"
+          {
+            echo "## D0d interaction coverage telemetry"
+            echo "- Same seeds / expert / map / horizon as D0c"
+            echo "- Only privileged read-only proximity and lane telemetry added"
+            echo "- Report: \`$DLS_DATA_ROOT/reports/d0/expert_interaction_exposure.json\`"
+            echo "- No model training; no bulk trajectory duplication."
+          } >> "$GITHUB_STEP_SUMMARY"
