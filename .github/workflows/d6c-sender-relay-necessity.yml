@@ -1,0 +1,138 @@
+name: DLS D6c test source-specific relay from output-disabled motor units
+
+on:
+  push:
+    paths:
+      - .github/workflows/d6c-sender-relay-necessity.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: dls-d6c-sender-relay-necessity
+  cancel-in-progress: false
+
+jobs:
+  frozen-sender-interventions:
+    runs-on: [self-hosted, Linux, X64]
+    timeout-minutes: 120
+    env:
+      DLS_DATA_ROOT: /mnt/datasets/lxb/dls
+      DLS_ENV: /home/ps/miniconda3/envs/dls-p0
+      TMPDIR: /mnt/datasets/lxb/dls/tmp
+      XDG_CACHE_HOME: /mnt/datasets/lxb/dls/cache/xdg
+      PYTHONNOUSERSITE: "1"
+      OMP_NUM_THREADS: "1"
+      OPENBLAS_NUM_THREADS: "1"
+      MKL_NUM_THREADS: "1"
+      NUMEXPR_NUM_THREADS: "1"
+    steps:
+      - name: Check source checkpoints and D6b success with no overwrites
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(findmnt -n -o TARGET -T "$DLS_DATA_ROOT")" = "/mnt/datasets"
+          test -s "$DLS_DATA_ROOT/reports/d6b/d6b-summary.json"
+          test ! -e "$DLS_DATA_ROOT/reports/d6c/d6c-summary.json"
+          mkdir -p "$TMPDIR" "$DLS_DATA_ROOT/reports/d6c/logs"
+          for seed in 42 43 44; do
+            test -s "$DLS_DATA_ROOT/checkpoints/d6b/cross-seed$seed.pt"
+          done
+          test ! -e "$DLS_DATA_ROOT/reports/d6c/eval/seed42-density0.00-shard0.json"
+          sha256sum "$DLS_DATA_ROOT/checkpoints/d6b/"cross-seed{42,43,44}.pt > "$DLS_DATA_ROOT/reports/d6c/original-D6b-sha256-before.txt"
+          df -h "$DLS_DATA_ROOT"
+
+      - name: Download pinned source and test targeted sender causality
+        shell: bash
+        run: |
+          set -euo pipefail
+          for item in "src/dls_local_motor.py:dls_local_motor.py" \
+                      "scripts/d6c_sender_relay_eval.py:d6c_sender_relay_eval.py" \
+                      "scripts/d6c_sender_relay_aggregate.py:d6c_sender_relay_aggregate.py"; do
+            SRC="${item%%:*}"
+            NAME="${item#*:}"
+            RAW="https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/${GITHUB_SHA}/$SRC"
+            OK=0
+            for URL in "https://gh-proxy.com/$RAW" "https://ghproxy.net/$RAW" "$RAW"; do
+              if curl -fLsS --connect-timeout 10 --max-time 60 "$URL" -o "$TMPDIR/$NAME"; then
+                OK=1
+                break
+              fi
+            done
+            test "$OK" = 1
+            "$DLS_ENV/bin/python" -m py_compile "$TMPDIR/$NAME"
+          done
+          "$DLS_ENV/bin/python" - <<'PY'
+          import os,sys,torch
+          sys.path.insert(0,os.environ["TMPDIR"])
+          from dls_local_motor import LocalMotorController,num_params
+          torch.set_num_threads(1)
+          torch.manual_seed(42)
+          m=LocalMotorController("cross").eval()
+          assert num_params(m)==114880
+          obs=torch.randn(2,259)
+          h=torch.randn(2,8,49)
+          sender=3
+          with torch.no_grad():
+              a0,s0=m.step(obs,h,1)
+              a1,s1=m.step(obs,h,1,blocked_sender=sender)
+              # Blocked unit i still sees exactly the same local perception and non-self messages.
+              torch.testing.assert_close(s0[:,sender],s1[:,sender],rtol=0,atol=0)
+              assert not torch.allclose(s0[:,0],s1[:,0])
+              assert not torch.allclose(a0,a1)
+              mask=torch.ones(8);mask[sender]=0
+              l0,sl0=m.step(obs,h,1,unit_mask=mask)
+              l1,sl1=m.step(obs,h,1,unit_mask=mask,blocked_sender=sender)
+              assert not torch.allclose(l0,l1)
+          print("D6c smoke PASS: selectively blocking sender i preserves its own state; affects others and control even if i cannot directly actuate",flush=True)
+          PY
+          sha256sum "$TMPDIR/dls_local_motor.py" "$TMPDIR/d6c_sender_relay_eval.py" "$TMPDIR/d6c_sender_relay_aggregate.py"
+
+      - name: Execute 1800 source-specific paired MetaDrive episodes with 18 CPU workers
+        shell: bash
+        run: |
+          set -euo pipefail
+          declare -a PIDS=()
+          declare -a NAMES=()
+          for seed in 42 43 44; do
+            for density in 0.00 0.10; do
+              for shard in 0 1 2; do
+                name="seed$seed-density$density-shard$shard"
+                "$DLS_ENV/bin/python" "$TMPDIR/d6c_sender_relay_eval.py" \
+                  --seed "$seed" --density "$density" --shard "$shard" \
+                  > "$DLS_DATA_ROOT/reports/d6c/logs/eval-$name.log" 2>&1 &
+                PIDS+=("$!")
+                NAMES+=("$name")
+              done
+            done
+          done
+          test "${#PIDS[@]}" -eq 18
+          failed=0
+          for i in "${!PIDS[@]}"; do
+            if wait "${PIDS[$i]}"; then
+              echo "PASS D6c ${NAMES[$i]}"
+              tail -1 "$DLS_DATA_ROOT/reports/d6c/logs/eval-${NAMES[$i]}.log"
+            else
+              echo "FAIL D6c ${NAMES[$i]}"
+              tail -100 "$DLS_DATA_ROOT/reports/d6c/logs/eval-${NAMES[$i]}.log"
+              failed=1
+            fi
+          done
+          test "$failed" -eq 0
+
+      - name: Verify frozen weights and analyze lesion-specific sender mediation
+        shell: bash
+        run: |
+          set -euo pipefail
+          sha256sum "$DLS_DATA_ROOT/checkpoints/d6b/"cross-seed{42,43,44}.pt > "$DLS_DATA_ROOT/reports/d6c/original-D6b-sha256-after.txt"
+          cmp "$DLS_DATA_ROOT/reports/d6c/original-D6b-sha256-before.txt" "$DLS_DATA_ROOT/reports/d6c/original-D6b-sha256-after.txt"
+          "$DLS_ENV/bin/python" "$TMPDIR/d6c_sender_relay_aggregate.py"
+          {
+            printf '%s\n' "## D6c targeted output-disabled motor sender information relay"
+            printf '%s\n' "- 3 unchanged D6b-cross checkpoints, 12 NEW scenes, 2 traffic densities"
+            printf '%s\n' "- 8 sender IDs × healthy/lesioned output × sender message blocked or present"
+            printf '%s\n' "- 1800 paired closed-loop episodes, 18 CPU workers, no training"
+            printf '%s\n' "- Primary result: factorial interaction of disabling motor i output and outbound message i"
+            printf '%s\n' "- Full report /mnt/datasets/lxb/dls/reports/d6c/d6c-summary.json"
+          } >> "$GITHUB_STEP_SUMMARY"
