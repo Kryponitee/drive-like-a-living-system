@@ -1,6 +1,6 @@
 # Drive Like a Living System (DLS)
 
-**Current stage (2026-11-17): D0/D1 and official PPO infrastructure are complete. D2n-A official RecurrentPPO: equal 65,536 frames/model, primary density 0.10 BC→PPO success A 11→12, B 13→13, C 13→9; C reward 268.90→237.21. We therefore use frozen D1 BC for D3. D3a recipient-rotation experiment (24 fresh scenes × 2 densities) did not impair C; its routing-specific causal effect is not established. D3a2 is testing whether norm-matched removal of cross-module message information impacts C. No feedback compensation result yet.**
+**Current stage (2026-11-17): D0/D1 and official PPO infrastructure are complete. D2n-A official BC-initialized RecurrentPPO yielded no consistent improvement (at density0.10 BC→PPO successes A 11→12, B 13→13, C 13→9). Primary D3 mechanism tests now use frozen D1 BC C. D3a recipient rotation did not harm C (9→11 successful episodes, density0.10); D3a2 norm-matched replacement of all C direct cross-module message content by own-module projections also did not harm it (9→12, reward 284.63→296.03). This is preliminary lack of necessary cross-module dependence in ONE trained seed, not proof coordination is absent. D3c is replicating across C seeds42/43/44 on fresh scenarios.**
 
 ## Research question
 
@@ -61,7 +61,8 @@ We **do not** prescribe driving-skill labels to internal units or assume that a 
 - [D2n-A first official A/B/C BC-initialized PPO training — SUCCESS](https://github.com/Kryponitee/drive-like-a-living-system/actions/runs/44032089904): each 65,536 frames / 64 workers, 24 new paired scene seeds × 3 densities. Primary density0.10 success A 11→12, B 13→13, C 13→9; C average raw reward 268.90→237.21. [Full experimental result](docs/research/2026-11-17-D2n-A-results-and-D3-transition.md).
 - [D2n-A read-only A/B runtime audit — SUCCESS](https://github.com/Kryponitee/drive-like-a-living-system/actions/runs/44034618614): A/B environment collection 85.2/94.4s but PPO + other non-collection 209.1/611.6s. Computational overhead is principally non-collection; parameter counts are matched but cost is not.
 - [D3a frozen BC B/C message-recipient routing — SUCCESS](https://github.com/Kryponitee/drive-like-a-living-system/actions/runs/44036737339): C original→rotated success 9→11 at density0.10 and 4→4 at density0.25, no consistent loss. [Outcome and limits](docs/research/2026-11-17-D3a-message-recipient-results.md).
-- [D3a2 direct C cross-message content replacement](https://github.com/Kryponitee/drive-like-a-living-system/actions/runs/44037421039): per-recipient matched-norm own-message substitute; reuse all D3a C baseline/rotation episodes, run only 48 new episodes. In progress; not yet concluded.
+- [D3a2 direct C cross-message content replacement — SUCCESS](https://github.com/Kryponitee/drive-like-a-living-system/actions/runs/44037421039): per-recipient matched-norm own-message substitute; 48 new episodes only, reusing D3a C original/rotation. C medium-density successes 9→12, rewards 284.63→296.03, but high-density successes 4→3. [Full interpretation](docs/research/2026-11-17-D3a2-cross-message-content-results.md).
+- [D3c 3-seed frozen C BC cross-message replication](https://github.com/Kryponitee/drive-like-a-living-system/actions/runs/44038017935): already trained BC C seeds42/43/44, new scenes32000..32023, baseline vs norm-matched own-only, 144 total episodes without training. [Preregistered evidence bar](docs/research/2026-11-17-D3c-three-seed-direct-message-necessity-plan.md); currently running.
 
 ## Previous records (retained for provenance)
 
