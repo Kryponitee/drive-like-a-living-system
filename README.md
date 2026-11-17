@@ -1,6 +1,6 @@
 # Drive Like a Living System (DLS)
 
-**Current stage (2026-11-17): D0–D1 completed; D2a–D2e diagnosed PPO exploration and policy drift; D2f frozen-BC action anchoring significantly reduced imitation drift, but produced mixed closed-loop rewards/success (B improved, A/C did not consistently). Next: critic value/advantage diagnostic. No causal module coordination evidence yet.**
+**Current stage (2026-11-17): D0–D1 completed; D2b–D2g diagnosed PPO: high exploration noise harms successful sampling; BC anchoring reduces policy drift, but closed-loop gains are inconsistent; frozen critics explain only about 0.8%–1.9% of realized return variance. Next: value-only critic learning diagnostic (D2h), then modular communication intervention (D3a). No causal coordination evidence yet.**
 
 ## Research question
 
@@ -42,7 +42,9 @@ We **do not** prescribe driving-skill labels to internal units or assume that a 
 - D2f: [BC functional anchor PPO run](https://github.com/Kryponitee/drive-like-a-living-system/actions/runs/44015006851): training, paired evaluations and validation passed; only last aggregate step failed due incorrect top-level seed metadata.
 - [D2f audit-only corrected aggregate — SUCCESS](https://github.com/Kryponitee/drive-like-a-living-system/actions/runs/44016058139): validates 30 completed original per-episode scene IDs, preserving untouched raw results. No reruns.
 - [D2f result and interpretation](docs/research/2026-11-17-D2f-BC-functional-anchor-results.md): validation Huber improved A/B/C, but new-scene closed-loop benefit arose only in B, not consistently across models.
-- Next: frozen-policy critic/advantage quality audit before spending more PPO training budget.
+- D2g: [frozen critic calibration audit — SUCCESS](https://github.com/Kryponitee/drive-like-a-living-system/actions/runs/44016459801); six frozen D2d/D2f critics explain only ~0.8–1.9% of observed discounted return variation, with value standard deviation ~0.7 vs realized returns ~24–26.
+- [D2g results and measured limits](docs/research/2026-11-17-D2g-critic-calibration-results.md).
+- Next: D2h value-only supervised return learning gate; avoid spending more PPO environment budget or claiming motor synergy until learning can be validated.
 - [D2 protocol and correctness record](docs/research/2026-11-17-D2a-D2b-recurrent-PPO.md).
 - Future: replicated closed-loop optimization and frozen-weight direct-message causal perturbations (D3).
 
