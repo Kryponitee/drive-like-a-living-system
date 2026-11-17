@@ -1,0 +1,177 @@
+name: DLS D1-prime longitudinal dual-pedal A-B-C behavior cloning
+
+on:
+  push:
+    paths:
+      - .github/workflows/d1-longitudinal-bc.yml
+      - scripts/d1_longitudinal_bc.py
+      - src/dls_longitudinal_motor.py
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: dls-d1-longitudinal-bc
+  cancel-in-progress: false
+
+jobs:
+  train:
+    runs-on: [self-hosted, Linux, X64]
+    timeout-minutes: 75
+    env:
+      DLS_DATA_ROOT: /mnt/datasets/lxb/dls
+      DLS_ENV: /home/ps/miniconda3/envs/dls-p0
+      DLS_DATA_ID: d1-longitudinal-v1-44117653285
+      TMPDIR: /mnt/datasets/lxb/dls/tmp
+      XDG_CACHE_HOME: /mnt/datasets/lxb/dls/cache/xdg
+      PYTHONNOUSERSITE: "1"
+      OMP_NUM_THREADS: "1"
+      OPENBLAS_NUM_THREADS: "1"
+      MKL_NUM_THREADS: "1"
+      NUMEXPR_NUM_THREADS: "1"
+      PYTHONPATH: /mnt/datasets/lxb/dls/tmp
+    steps:
+      - name: Verify immutable dataset and fresh output paths
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(findmnt -n -o TARGET -T "$DLS_DATA_ROOT")" = "/mnt/datasets"
+          test -x "$DLS_ENV/bin/python"
+          test -d "$DLS_DATA_ROOT/demonstrations/$DLS_DATA_ID/train"
+          test -d "$DLS_DATA_ROOT/demonstrations/$DLS_DATA_ID/val"
+          test -d "$DLS_DATA_ROOT/demonstrations/$DLS_DATA_ID/test"
+          test ! -e "$DLS_DATA_ROOT/checkpoints/$DLS_DATA_ID"
+          for variant in A B C; do
+            for seed in 42 43 44; do
+              test ! -e "$DLS_DATA_ROOT/reports/$DLS_DATA_ID/train-$variant-seed$seed.json"
+            done
+          done
+          mkdir -p "$TMPDIR"
+          nvidia-smi -L
+          df -h "$DLS_DATA_ROOT"
+
+      - name: Download and compile pinned model and training code
+        shell: bash
+        run: |
+          set -euo pipefail
+          for item in "src/dls_longitudinal_motor.py:dls_longitudinal_motor.py" \
+                      "scripts/d1_longitudinal_bc.py:d1_longitudinal_bc.py"; do
+            SRC="${item%%:*}"
+            NAME="${item#*:}"
+            RAW="https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/${GITHUB_SHA}/$SRC"
+            OK=0
+            for URL in "https://gh-proxy.com/$RAW" "https://ghproxy.net/$RAW" "$RAW"; do
+              if curl -fLsS --connect-timeout 10 --max-time 60 "$URL" -o "$TMPDIR/$NAME"; then
+                OK=1
+                break
+              fi
+            done
+            test "$OK" = 1
+            "$DLS_ENV/bin/python" -m py_compile "$TMPDIR/$NAME"
+          done
+          sha256sum "$TMPDIR/dls_longitudinal_motor.py" "$TMPDIR/d1_longitudinal_bc.py"
+
+      - name: Smoke-check action range, parameter matching and gradients
+        shell: bash
+        run: |
+          set -euo pipefail
+          "$DLS_ENV/bin/python" - <<'PY'
+          import torch
+          from dls_longitudinal_motor import model_info, num_params, run_sequence
+          assert torch.cuda.is_available() and torch.cuda.device_count() >= 3
+          torch.set_num_threads(1)
+          torch.manual_seed(42)
+          b, bi = model_info("B")
+          torch.manual_seed(42)
+          c, ci = model_info("C")
+          assert num_params(b) == num_params(c) == 114880
+          for key in b.state_dict():
+              torch.testing.assert_close(b.state_dict()[key], c.state_dict()[key], rtol=0, atol=0)
+          for variant in ("A", "B", "C"):
+              torch.manual_seed(42)
+              model, info = model_info(variant)
+              x = torch.randn(2, 40, 259)
+              y = run_sequence(model, x)
+              assert y.shape == (2, 40, 2)
+              assert torch.isfinite(y).all() and bool((y >= 0).all() and (y <= 1).all())
+              loss = (y - torch.rand_like(y)).square().mean()
+              loss.backward()
+              assert all(p.grad is None or torch.isfinite(p.grad).all() for p in model.parameters())
+              print(variant, info["num_params"], tuple(y.shape), float(y.min()), float(y.max()))
+          print("D1-prime model smoke PASS")
+          PY
+
+      - name: Train 9 matched models on 3 GPUs
+        shell: bash
+        run: |
+          set -euo pipefail
+          declare -a PIDS=()
+          declare -a NAMES=()
+          launch() {
+            local variant="$1"
+            local seed="$2"
+            local gpu="$3"
+            local name="$variant-seed$seed"
+            "$DLS_ENV/bin/python" "$TMPDIR/d1_longitudinal_bc.py" \
+              --variant "$variant" --seed "$seed" --gpu "$gpu" --data-id "$DLS_DATA_ID" \
+              > "$DLS_DATA_ROOT/tmp/d1-bc-$DLS_DATA_ID-$name.log" 2>&1 &
+            PIDS+=("$!")
+            NAMES+=("$name")
+          }
+          for variant in A B C; do
+            launch "$variant" 42 0
+            launch "$variant" 43 1
+            launch "$variant" 44 2
+          done
+          test "${#PIDS[@]}" -eq 9
+          failed=0
+          for i in "${!PIDS[@]}"; do
+            if wait "${PIDS[$i]}"; then
+              echo "PASS ${NAMES[$i]}"
+              tail -4 "$DLS_DATA_ROOT/tmp/d1-bc-$DLS_DATA_ID-${NAMES[$i]}.log"
+            else
+              echo "FAIL ${NAMES[$i]}"
+              tail -100 "$DLS_DATA_ROOT/tmp/d1-bc-$DLS_DATA_ID-${NAMES[$i]}.log"
+              failed=1
+            fi
+          done
+          test "$failed" -eq 0
+
+      - name: Audit all checkpoints and validation reports
+        shell: bash
+        run: |
+          set -euo pipefail
+          "$DLS_ENV/bin/python" - <<'PY'
+          import json, os
+          from pathlib import Path
+          root=Path(os.environ["DLS_DATA_ROOT"])
+          data_id=os.environ["DLS_DATA_ID"]
+          report_dir=root/"reports"/data_id
+          ckpt_dir=root/"checkpoints"/data_id
+          rows=[]
+          for variant in ("A","B","C"):
+              for seed in (42,43,44):
+                  report=json.loads((report_dir/f"train-{variant}-seed{seed}.json").read_text())
+                  checkpoint=ckpt_dir/f"{variant}-seed{seed}.pt"
+                  assert checkpoint.is_file()
+                  assert report["data_id"]==data_id and report["variant"]==variant and report["seed"]==seed
+                  assert report["train_episodes"]>=70 and report["val_episodes"]>=24
+                  assert report["num_params"]==report["architecture"]["num_params"]
+                  assert 0.0 <= report["best_val_huber"] < 1.0
+                  rows.append({
+                      "variant":variant,"seed":seed,"params":report["num_params"],
+                      "best_epoch":report["history"][report["best_epoch"]-1]["epoch"],
+                      "val_huber":report["best_val_huber"],
+                      "throttle_mae":report["history"][report["best_epoch"]-1]["throttle_mae"],
+                      "brake_mae":report["history"][report["best_epoch"]-1]["brake_mae"],
+                  })
+          print(json.dumps(rows,indent=2))
+          PY
+          {
+            printf '%s\n' "## DLS D1-prime longitudinal dual-pedal BC"
+            printf '%s\n' "- Dataset: `$DLS_DATA_ID`"
+            printf '%s\n' "- 3 matched architectures × 3 seeds; 8 epochs each; 3 GPUs"
+            printf '%s\n' "- All models emit two independent Sigmoid channels in [0,1]"
+            printf '%s\n' "- Reports/checkpoints are immutable and stored under the dataset ID"
+          } >> "$GITHUB_STEP_SUMMARY"
