@@ -1,0 +1,93 @@
+name: DLS D0-prime independent absolute throttle-brake actuator smoke
+
+on:
+  push:
+    paths:
+      - .github/workflows/d0-dual-pedal-smoke.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: dls-d0-dual-pedal-smoke
+  cancel-in-progress: false
+
+jobs:
+  actuator-smoke:
+    runs-on: [self-hosted, Linux, X64]
+    timeout-minutes: 25
+    env:
+      DLS_DATA_ROOT: /mnt/datasets/lxb/dls
+      DLS_ENV: /home/ps/miniconda3/envs/dls-p0
+      TMPDIR: /mnt/datasets/lxb/dls/tmp
+      XDG_CACHE_HOME: /mnt/datasets/lxb/dls/cache/xdg
+      PYTHONNOUSERSITE: "1"
+      OMP_NUM_THREADS: "1"
+      OPENBLAS_NUM_THREADS: "1"
+      MKL_NUM_THREADS: "1"
+      NUMEXPR_NUM_THREADS: "1"
+    steps:
+      - name: Verify existing DLS environment and protected report path
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(findmnt -n -o TARGET -T "$DLS_DATA_ROOT")" = "/mnt/datasets"
+          test -x "$DLS_ENV/bin/python"
+          test -s "$DLS_DATA_ROOT/metadrive_assets/version.txt"
+          test ! -e "$DLS_DATA_ROOT/reports/d0-dual-pedal/actuator-smoke.json"
+          mkdir -p "$TMPDIR" "$DLS_DATA_ROOT/reports/d0-dual-pedal"
+          "$DLS_ENV/bin/python" - <<'PY'
+          import metadrive, numpy, sys
+          print("python", sys.version)
+          print("metadrive", getattr(metadrive, "__version__", "version-not-exported"))
+          print("numpy", numpy.__version__)
+          PY
+          df -h "$DLS_DATA_ROOT"
+
+      - name: Download and compile the exact committed adapter and test
+        shell: bash
+        run: |
+          set -euo pipefail
+          for item in "src/dls_dual_pedal_adapter.py:dls_dual_pedal_adapter.py" \
+                      "scripts/d0_dual_pedal_smoke.py:d0_dual_pedal_smoke.py"; do
+            SRC="${item%%:*}"
+            NAME="${item#*:}"
+            RAW="https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/${GITHUB_SHA}/$SRC"
+            OK=0
+            for URL in "https://gh-proxy.com/$RAW" "https://ghproxy.net/$RAW" "$RAW"; do
+              if curl -fLsS --connect-timeout 10 --max-time 60 "$URL" -o "$TMPDIR/$NAME"; then
+                OK=1
+                break
+              fi
+            done
+            test "$OK" = 1
+            "$DLS_ENV/bin/python" -m py_compile "$TMPDIR/$NAME"
+          done
+          sha256sum "$TMPDIR/dls_dual_pedal_adapter.py" "$TMPDIR/d0_dual_pedal_smoke.py"
+
+      - name: Run three-seed physical actuator verification
+        shell: bash
+        run: |
+          set -euo pipefail
+          "$DLS_ENV/bin/python" "$TMPDIR/d0_dual_pedal_smoke.py" | tee "$DLS_DATA_ROOT/reports/d0-dual-pedal/console-${GITHUB_RUN_ID}.json"
+          test -s "$DLS_DATA_ROOT/reports/d0-dual-pedal/actuator-smoke.json"
+          "$DLS_ENV/bin/python" - <<'PY'
+          import json, os
+          p=os.path.join(os.environ["DLS_DATA_ROOT"],"reports","d0-dual-pedal","actuator-smoke.json")
+          r=json.load(open(p))
+          assert r["all_passed"] and r["num_episodes"] == 3
+          print("D0-prime PASS:", r["num_episodes"], "seeds")
+          for e in r["episodes"]:
+              print("seed",e["seed"],"speed",round(e["speed_initial_mps"],3),
+                    "->",round(e["speed_after_acceleration_mps"],3),
+                    "->",round(e["speed_after_braking_mps"],3),
+                    "simultaneous",e["simultaneous"])
+          PY
+          {
+            printf '%s\n' "## DLS D0-prime: independent absolute throttle/brake"
+            printf '%s\n' "- Result: PASS on 3 seeds; no model training"
+            printf '%s\n' "- Interface: two independent values in [0,1], applied separately as engine force and brake force"
+            printf '%s\n' "- Steering: fixed zero on straight map S"
+            printf '%s\n' "- Report: `$DLS_DATA_ROOT/reports/d0-dual-pedal/actuator-smoke.json`"
+          } >> "$GITHUB_STEP_SUMMARY"
