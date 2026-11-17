@@ -20,7 +20,8 @@ assert os.path.ismount("/mnt/datasets")
 
 REPORT_DIR = DATA_ROOT / "reports" / "d0-dual-pedal"
 REPORT_DIR.mkdir(parents=True, exist_ok=True)
-REPORT_PATH = REPORT_DIR / "actuator-smoke.json"
+RUN_ID = os.environ.get("GITHUB_RUN_ID", "manual")
+REPORT_PATH = REPORT_DIR / f"actuator-smoke-{RUN_ID}.json"
 assert not REPORT_PATH.exists(), f"Refusing to overwrite {REPORT_PATH}"
 
 SEEDS = (7101, 7102, 7103)
