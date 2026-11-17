@@ -1,6 +1,6 @@
 # Drive Like a Living System (DLS)
 
-**Current stage (2026-11-17): D0+D1 completed; D2a recurrent PPO math correctness passed; D2b small equal-step closed-loop PPO pilot running. No evidence yet for causal inter-module motor coordination.**
+**Current stage (2026-11-17): D0+D1 done; D2a PPO mechanics passed; D2b PPO lost BC driving performance; D2c confirmed excessive Gaussian steering exploration as the primary obstacle; D2d low-noise PPO correction under test. No causal motor coordination evidence yet.**
 
 ## Research question
 
@@ -35,7 +35,9 @@ We **do not** prescribe driving-skill labels to internal units or assume that a 
 - [Fresh held-out seeds 3100–3123 — SUCCESS](https://github.com/Kryponitee/drive-like-a-living-system/actions/runs/44010604782)
 - [Fresh-scene test interpretation and detailed outcomes](docs/research/2026-11-17-D1f-fresh-scene-results.md): at density=0.10 C outperformed B for all three trained seeds, but aggregate advantage did not hold consistently over densities; no causal coordination conclusion.
 - D2a: [recurrent PPO correctness audit — SUCCESS](https://github.com/Kryponitee/drive-like-a-living-system/actions/runs/44011443700), old-policy replay probability ratio=1 with proper tanh density, recurrent state replays and finite gradients.
-- D2b: [small 4,096-step-per-model PPO trial](https://github.com/Kryponitee/drive-like-a-living-system/actions/runs/44011875754) launched, results must be checked before any learning claim.
+- D2b: [equal-step 4,096-transition PPO pilot — completed](https://github.com/Kryponitee/drive-like-a-living-system/actions/runs/44011875754): train-time success episodes A/B/C = 0/0/3; final closed-loop performance broadly degraded.
+- D2c: [frozen BC noise intervention — completed](https://github.com/Kryponitee/drive-like-a-living-system/actions/runs/44012974852): at density 0.10 success A/B/C collapsed from 16/18/18 of 24 when deterministic to 1/1/1 at pre-tanh exploration sigma=0.27.
+- D2d: [one-factor sigma=0.05 PPO correction](https://github.com/Kryponitee/drive-like-a-living-system/actions/runs/44013255699) launched; initial BC and prior PPO will be re-evaluated on identical fresh scenarios.
 - [D2 protocol and correctness record](docs/research/2026-11-17-D2a-D2b-recurrent-PPO.md).
 - Future: replicated closed-loop optimization and frozen-weight direct-message causal perturbations (D3).
 
