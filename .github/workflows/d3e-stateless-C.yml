@@ -1,0 +1,146 @@
+name: DLS D3e frozen C strictly stateless reactive-control sufficiency
+
+on:
+  push:
+    paths:
+      - .github/workflows/d3e-stateless-C.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: dls-d3e-frozen-stateless
+  cancel-in-progress: false
+
+jobs:
+  stateless:
+    runs-on: [self-hosted, Linux, X64]
+    timeout-minutes: 28
+    env:
+      DLS_DATA_ROOT: /mnt/datasets/lxb/dls
+      DLS_ENV: /home/ps/miniconda3/envs/dls-p0
+      TMPDIR: /mnt/datasets/lxb/dls/tmp
+      PYTHONNOUSERSITE: "1"
+      OMP_NUM_THREADS: "1"
+      MKL_NUM_THREADS: "1"
+      OPENBLAS_NUM_THREADS: "1"
+      NUMEXPR_NUM_THREADS: "1"
+    steps:
+      - name: Validate frozen original C BC checkpoints and prior D3c/D3d development controls
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(findmnt -n -o TARGET -T "$DLS_DATA_ROOT")" = "/mnt/datasets"
+          for seed in 42 43 44; do
+            test -s "$DLS_DATA_ROOT/checkpoints/d1-v1/C-seed$seed.pt"
+            test -s "$DLS_DATA_ROOT/reports/d3c/eval-C-seed$seed-baseline-density0.10.json"
+            test -s "$DLS_DATA_ROOT/reports/d3d/reset-C-seed$seed.json"
+          done
+          test ! -e "$DLS_DATA_ROOT/reports/d3e/d3e-summary.json"
+          mkdir -p "$TMPDIR" "$DLS_DATA_ROOT/reports/d3e/logs"
+          sha256sum "$DLS_DATA_ROOT/checkpoints/d1-v1/"C-seed{42,43,44}.pt \
+            > "$DLS_DATA_ROOT/reports/d3e/BC-C-sha256-before.txt"
+
+      - name: Download original unchanged C controller and stateless C script only
+        shell: bash
+        run: |
+          set -euo pipefail
+          for item in "src/dls_p0.py:dls_p0.py" \
+                      "scripts/d3e_stateless_C_policy.py:d3e.py"; do
+            SRC="${item%%:*}"
+            TARGET="${item#*:}"
+            RAW="https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/${GITHUB_SHA}/$SRC"
+            OK=0
+            for URL in "https://gh-proxy.com/$RAW" "https://ghproxy.net/$RAW" "$RAW"; do
+              if curl -fLsS --connect-timeout 10 --max-time 60 "$URL" -o "$TMPDIR/$TARGET"; then
+                OK=1
+                break
+              fi
+            done
+            test "$OK" = 1
+            "$DLS_ENV/bin/python" -m py_compile "$TMPDIR/$TARGET"
+            sha256sum "$TMPDIR/$TARGET"
+          done
+
+      - name: Three frozen C trained seeds with no fast or slow internal state carried across actions
+        shell: bash
+        run: |
+          set -euo pipefail
+          declare -a PIDS=()
+          declare -a SEEDS=(42 43 44)
+          for seed in "${SEEDS[@]}"; do
+            "$DLS_ENV/bin/python" "$TMPDIR/d3e.py" --model-seed "$seed" \
+              > "$DLS_DATA_ROOT/reports/d3e/logs/seed$seed.log" 2>&1 &
+            PIDS+=("$!")
+          done
+          failed=0
+          for i in "${!PIDS[@]}"; do
+            seed="${SEEDS[$i]}"
+            if wait "${PIDS[$i]}"; then
+              echo "PASS stateless C seed$seed"
+              tail -1 "$DLS_DATA_ROOT/reports/d3e/logs/seed$seed.log"
+            else
+              echo "FAIL stateless C seed$seed"
+              tail -85 "$DLS_DATA_ROOT/reports/d3e/logs/seed$seed.log"
+              failed=1
+            fi
+          done
+          test "$failed" = 0
+
+      - name: Compare C original versus fast-memory-only reset and truly stateless current input mapping
+        shell: bash
+        run: |
+          set -euo pipefail
+          "$DLS_ENV/bin/python" - <<'PY'
+          import json
+          from pathlib import Path
+          root=Path("/mnt/datasets/lxb/dls/reports")
+          summary={
+              "stage":"D3e stateless current-only extracted C controller vs original and h-only reset",
+              "trained_C_BC_seeds":[42,43,44],
+              "eval_scene_seeds":list(range(32000,32024)),
+              "density":0.10,
+              "new_simulator_episodes":72,
+              "reused_prior_control_episodes":144,
+              "new_training_steps":0,
+              "model_original_code_and_weights":True,
+              "models":{},
+          }
+          for seed in (42,43,44):
+              old=json.loads((root/f"d3c/eval-C-seed{seed}-baseline-density0.10.json").read_text())
+              fast=json.loads((root/f"d3d/reset-C-seed{seed}.json").read_text())
+              no_memory=json.loads((root/f"d3e/stateless-C-seed{seed}.json").read_text())
+              for x in (old,fast,no_memory):
+                  assert [e["seed"] for e in x["episodes"]]==list(range(32000,32024))
+              assert old["source_checkpoint_sha256"]==fast["source_sha256"]==no_memory["source_checkpoint_sha256"]
+              summary["models"][str(seed)]={
+                  "baseline_success":old["success"],
+                  "fast_h_reset_success":fast["success"],
+                  "strict_stateless_success":no_memory["success"],
+                  "baseline_mean_reward":old["mean_raw_reward"],
+                  "fast_h_reset_mean_reward":fast["mean_raw_reward"],
+                  "strict_stateless_mean_reward":no_memory["mean_raw_reward"],
+                  "strict_stateless_minus_baseline_success":no_memory["success"]-old["success"],
+                  "strict_stateless_minus_baseline_mean_reward":no_memory["mean_raw_reward"]-old["mean_raw_reward"],
+                  "strict_stateless_minus_fast_h_reset_mean_reward":no_memory["mean_raw_reward"]-fast["mean_raw_reward"],
+                  "original_vs_stateless_paired_reward_delta":[s["reward"]-o["reward"] for o,s in zip(old["episodes"],no_memory["episodes"])],
+              }
+              r=summary["models"][str(seed)]
+              print("D3e seed",seed,"original/h-reset/stateless success",
+                    r["baseline_success"],r["fast_h_reset_success"],r["strict_stateless_success"],
+                    "stateless reward change",round(r["strict_stateless_minus_baseline_mean_reward"],2))
+          out=root/"d3e/d3e-summary.json"
+          assert not out.exists()
+          out.write_text(json.dumps(summary,ensure_ascii=False,indent=2),encoding="utf-8")
+          PY
+          sha256sum "$DLS_DATA_ROOT/checkpoints/d1-v1/"C-seed{42,43,44}.pt \
+            > "$DLS_DATA_ROOT/reports/d3e/BC-C-sha256-after.txt"
+          cmp "$DLS_DATA_ROOT/reports/d3e/BC-C-sha256-before.txt" "$DLS_DATA_ROOT/reports/d3e/BC-C-sha256-after.txt"
+          {
+            echo "## D3e stateless current-only C control"
+            echo "- 3 frozen BC C training seeds with no hidden carry, no slow memory"
+            echo "- 72 new episodes; D3c + D3d 144 prior controls reused, no simulator restarts for controls"
+            echo "- Tested 259D current-only policy output with original trained weights unchanged"
+            echo "- Summary: \`$DLS_DATA_ROOT/reports/d3e/d3e-summary.json\`"
+          } >> "$GITHUB_STEP_SUMMARY"
