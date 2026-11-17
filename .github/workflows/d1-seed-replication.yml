@@ -1,0 +1,183 @@
+name: DLS D1e BC initialization-seed replication
+
+on:
+  push:
+    paths:
+      - .github/workflows/d1-seed-replication.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: dls-d1-bc-seed-replication
+  cancel-in-progress: false
+
+jobs:
+  replicate:
+    runs-on: [self-hosted, Linux, X64]
+    timeout-minutes: 60
+    env:
+      DLS_DATA_ROOT: /mnt/datasets/lxb/dls
+      DLS_ENV: /home/ps/miniconda3/envs/dls-p0
+      TMPDIR: /mnt/datasets/lxb/dls/tmp
+      PYTHONNOUSERSITE: "1"
+      XDG_CACHE_HOME: /mnt/datasets/lxb/dls/cache/xdg
+      OMP_NUM_THREADS: "1"
+      OPENBLAS_NUM_THREADS: "1"
+      MKL_NUM_THREADS: "1"
+      NUMEXPR_NUM_THREADS: "1"
+      DLS_D1_TRAINING: "1"
+    steps:
+      - name: Verify data and first training result already exist
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(findmnt -n -o TARGET -T "$DLS_DATA_ROOT")" = "/mnt/datasets"
+          test -f "$DLS_DATA_ROOT/reports/d1/d1-pilot-summary.json"
+          test -f "$DLS_DATA_ROOT/demonstrations/d1-v1/train/worker-00-density-0.00.npz"
+          for variant in A B C; do
+            test -f "$DLS_DATA_ROOT/checkpoints/d1-v1/$variant-seed42.pt"
+          done
+          "$DLS_ENV/bin/python" -c "import torch; assert torch.cuda.device_count() >= 6"
+          mkdir -p "$TMPDIR" "$DLS_DATA_ROOT/reports/d1/replicate-logs"
+          df -h "$DLS_DATA_ROOT"
+
+      - name: Reuse identical source version across all six runs
+        shell: bash
+        run: |
+          set -euo pipefail
+          for item in "src/dls_p0.py:dls_p0.py" "scripts/d1_bc.py:d1_bc.py" "scripts/d1_eval.py:d1_eval.py"; do
+            SRC="${item%%:*}"
+            NAME="${item#*:}"
+            RAW="https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/${GITHUB_SHA}/$SRC"
+            OK=0
+            for URL in "https://gh-proxy.com/$RAW" "https://ghproxy.net/$RAW" "$RAW"; do
+              if curl -fLsS --connect-timeout 10 --max-time 60 "$URL" -o "$TMPDIR/$NAME"; then
+                OK=1
+                break
+              fi
+            done
+            test "$OK" -eq 1
+            "$DLS_ENV/bin/python" -m py_compile "$TMPDIR/$NAME"
+          done
+          sha256sum "$TMPDIR/dls_p0.py" "$TMPDIR/d1_bc.py" "$TMPDIR/d1_eval.py"
+          "$DLS_ENV/bin/python" - <<'PY'
+          import os, sys
+          sys.path.insert(0, os.environ["TMPDIR"])
+          from dls_p0 import model_info, nparams
+          assert nparams(model_info("B")[0]) == nparams(model_info("C")[0])
+          PY
+
+      - name: Train extra seeds 43 and 44 x 3 variants on 6 GPUs
+        shell: bash
+        run: |
+          set -euo pipefail
+          declare -a PIDS=()
+          declare -a NAMES=()
+          gpu=0
+          for seed in 43 44; do
+            for variant in A B C; do
+              name="$variant-seed$seed"
+              "$DLS_ENV/bin/python" "$TMPDIR/d1_bc.py" \
+                --variant "$variant" --gpu "$gpu" --seed "$seed" --epochs 8 --batch-size 48 \
+                > "$DLS_DATA_ROOT/reports/d1/replicate-logs/train-$name.log" 2>&1 &
+              PIDS+=("$!")
+              NAMES+=("$name")
+              gpu=$((gpu + 1))
+            done
+          done
+          failed=0
+          for i in "${!PIDS[@]}"; do
+            if wait "${PIDS[$i]}"; then
+              echo "PASS train ${NAMES[$i]}"
+              grep "best_val_huber" "$DLS_DATA_ROOT/reports/d1/replicate-logs/train-${NAMES[$i]}.log" | tail -1
+            else
+              echo "FAIL train ${NAMES[$i]}"
+              tail -60 "$DLS_DATA_ROOT/reports/d1/replicate-logs/train-${NAMES[$i]}.log"
+              failed=1
+            fi
+          done
+          test "$failed" -eq 0
+
+      - name: Evaluate six new models on the same pilot scenes in parallel
+        shell: bash
+        run: |
+          set -euo pipefail
+          declare -a PIDS=()
+          declare -a NAMES=()
+          for seed in 43 44; do
+            for variant in A B C; do
+              name="$variant-seed$seed"
+              "$DLS_ENV/bin/python" "$TMPDIR/d1_eval.py" --variant "$variant" --seed "$seed" \
+                > "$DLS_DATA_ROOT/reports/d1/replicate-logs/eval-$name.log" 2>&1 &
+              PIDS+=("$!")
+              NAMES+=("$name")
+            done
+          done
+          failed=0
+          for i in "${!PIDS[@]}"; do
+            if wait "${PIDS[$i]}"; then
+              echo "PASS eval ${NAMES[$i]}"
+              grep -E "^([ABC]): traffic=" "$DLS_DATA_ROOT/reports/d1/replicate-logs/eval-${NAMES[$i]}.log"
+            else
+              echo "FAIL eval ${NAMES[$i]}"
+              tail -60 "$DLS_DATA_ROOT/reports/d1/replicate-logs/eval-${NAMES[$i]}.log"
+              failed=1
+            fi
+          done
+          test "$failed" -eq 0
+
+      - name: Aggregate paired seed differences without false sample independence
+        shell: bash
+        run: |
+          set -euo pipefail
+          "$DLS_ENV/bin/python" - <<'PY'
+          import json
+          from pathlib import Path
+          root=Path("/mnt/datasets/lxb/dls/reports/d1")
+          result={"stage":"D1e repeated initialization seed pilot (three seeds on same eight eval scenes per density)",
+                  "seed_list":[42,43,44], "reused_dataset":True,
+                  "tested_scenes":[3000,3001,3002,3003,3004,3005,3006,3007],
+                  "one_seed_is_not_an_independent_scenario":True, "by_variant":{}}
+          for variant in "ABC":
+              runs=[]
+              for seed in (42,43,44):
+                  tr=json.loads((root/f"train-{variant}-seed{seed}.json").read_text())
+                  ev=json.loads((root/f"closed-loop-{variant}-seed{seed}.json").read_text())
+                  runs.append({
+                      "seed": seed, "params": tr["num_params"],
+                      "val_huber": tr["best_val_huber"],
+                      "by_density": {
+                          str(x["density"]): {
+                              "success": x["success"],
+                              "collision": x["collisions"],
+                              "out_of_road":x["out_of_road"],
+                              "timeout":x["timeout"],
+                              "route_completion":x["mean_route_completion"],
+                          } for x in ev["results"]
+                      },
+                      "total_success_out_of_24": sum(x["success"] for x in ev["results"]),
+                  })
+              result["by_variant"][variant] = runs
+          result["paired_C_minus_B_total_success_by_seed"] = [
+              result["by_variant"]["C"][i]["total_success_out_of_24"] -
+              result["by_variant"]["B"][i]["total_success_out_of_24"]
+              for i in range(3)
+          ]
+          result["overall_C_minus_B_note"]="Differences from three initializations on the SAME 24 evaluation scenarios; do not treat 72 episodes as independent."
+          path=root/"d1-seed-replication-summary.json"
+          path.write_text(json.dumps(result, indent=2), encoding="utf-8")
+          print("B/C success differences on 24 paired scenes, by model seed:",
+                result["paired_C_minus_B_total_success_by_seed"])
+          for variant in "ABC":
+              print(variant, [(r["seed"],r["total_success_out_of_24"],round(r["val_huber"],6)) for r in result["by_variant"][variant]])
+          PY
+          {
+            echo "## D1e three model-seed replication"
+            echo "- Trained new seeds 43 and 44 across A/B/C, six GPU processes"
+            echo "- Reused all D1 data, code, models and seed42 results"
+            echo "- All model seeds evaluated on the SAME pilot scenes for paired comparisons"
+            echo "- Aggregate: \`$DLS_DATA_ROOT/reports/d1/d1-seed-replication-summary.json\`"
+            echo "- No D2/D3 claims and no independent confirmation yet"
+          } >> "$GITHUB_STEP_SUMMARY"
