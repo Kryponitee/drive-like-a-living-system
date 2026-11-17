@@ -1,6 +1,6 @@
 # Drive Like a Living System (DLS)
 
-**Current stage (2026-11-17): D0/D1 and official PPO infrastructure are complete. D6c targeted sender-relay intervention finished with no positive replicated relay effect. A critical interface mismatch was then identified: the implemented D1–D6c policy controls MetaDrive's [steering, signed throttle_brake], while the intended research interface is two independent absolute [throttle, brake] outputs. Existing results are retained but scoped to the implemented interface; D7 is paused until steering ownership and the two-pedal adapter are specified. D2n-A BC-initialized PPO did not consistently improve driving. D3a/D3a2/D3c froze BC C and tested learned cross-module routing/content: no robust dependence over three independently trained seeds (only seed44 showed candidate loss on self-only substitution). D3d/D3e directly tested hidden-state retention: even when the entire fast-GRU/slow-z memory is discarded every tick, C seed42/43 maintained similar or better driving, while seed44 was harmed. Conclusion: the current 259D structured-observation BC task has not provided replicated evidence that C needs direct communication or persistent memory. D4a completed: independently trained capacity-matched stateless F had consistently lower BC validation fit and 2–3 fewer successes per 24 scenes than C across 3 seeds × 3 densities; this cannot isolate recurrence from model architecture/optimization. No confirmed motor-synergy role, transfer, or causal compensation yet. Next high-value gate: assess task-level motor coupling and controlled feedback/functional module interventions before adding complexity.**
+**Current stage (2026-11-17): the research target has been corrected to longitudinal control with two independent absolute outputs, `[throttle, brake] ∈ [0,1]^2`; steering is external. D0′ physical actuator verification passed on 3 seeds, and the PPO longitudinal teacher audit passed on 12/12 straight-road episodes across traffic densities 0/.1/.25 (1,470 transitions; 31.77% brake-active). No DLS training has yet been run on the corrected interface. Next: collect a larger disjoint longitudinal dataset, train fresh capacity-matched A/B/C models with two Sigmoid outputs, then evaluate closed-loop before any new coordination claim. Historical D1–D6c experiments remain valid for MetaDrive's old `[steering, signed throttle_brake]` interface only; they do not establish results for the new two-pedal task.**
 
 ## Research question
 
@@ -10,18 +10,19 @@ We **do not** prescribe driving-skill labels to internal units or assume that a 
 
 ## Active protocol
 
-**[P0 v1.0 — Learnable modular motor coordination with feedback and communication](docs/research/2026-11-16-P0-protocol-v1.md)**
+**[P0 v2.0 — Longitudinal dual-pedal motor coordination](docs/research/2026-11-17-P0-longitudinal-dual-pedal-protocol-v2.md)**
 
-- **Environment:** MetaDrive structured observations (no camera/visual E2E in P0).
-- **High level N:** scene/navigation/feedback -> coordination conditioning.
-- **Low level C:** learned recurrent modules, soft routing, common action head, physical-state feedback.
-- **Main comparison:** modular controller with *only shared physical feedback* versus the same controller *with learnable direct inter-module communication*. Include a matched monolithic recurrent-policy baseline.
-- **Evidence requirements:** closed-loop competence, repeatable role/reuse, and causal feedback compensation under controlled perturbations.
-- **Status:** MetaDrive 0.4.3 environment and headless smoke verified. Deterministic expert audit: 9/12 success with 800-step horizon versus 4/12 at 400-step cap; 3/12 collision in either setting. See the report below. This is an infrastructure/data audit, **not a learned coordination result**.
+- **Environment:** MetaDrive structured observations; no visual input in P0.
+- **DLS output:** independent absolute throttle and brake, each in [0,1].
+- **Steering:** external fixed controller; initial validation uses zero steering on straight map S.
+- **Main comparison:** matched monolithic GRU, local-only modular controller, and modular controller with learnable cross-module communication.
+- **Evidence requirements:** closed-loop competence, reusable internal organization, and causal compensation under controlled module/feedback interventions.
+- **Current status:** D0′ actuator and teacher audits passed; D1′ dataset expansion and fresh BC training are next.
 
 ## D0 execution evidence
 
 - [2026-11-17 — Environment and expert audit (real server logs and outcomes)](docs/research/2026-11-17-D0-environment-and-expert-audit.md)
+- [D0′ independent absolute throttle/brake actuator and teacher audit](docs/research/2026-11-17-D0-prime-dual-pedal-results.md): actuator test 3/3 seeds; teacher 12/12 episodes across 3 densities, 1,470 transitions, 467 brake-active labels. [Actuator Actions](https://github.com/Kryponitee/drive-like-a-living-system/actions/runs/44114809476) · [Teacher Actions](https://github.com/Kryponitee/drive-like-a-living-system/actions/runs/44115596585).
 - Dataset and asset root: `/mnt/datasets/lxb/dls/` on a separate volume.
 - Python Conda environment: `/home/ps/miniconda3/envs/dls-p0/` on system disk.
 - D0 traffic/interaction audits completed; training and evaluation outputs stored exclusively on the data disk.
@@ -73,7 +74,7 @@ We **do not** prescribe driving-skill labels to internal units or assume that a 
 - **D6 isolated local sensory-information pressure — SUCCESS (no robust cross advantage)**: fixed orthogonal 259→264 split to eight 33D local sensors, 114880 params matched for local/self vs cross/peer; 3 seeds × 3 densities × 24 new scenes × local/cross/frozen-cross-blocked = 648 paired closed-loop records. Success totals **79/216 local, 79/216 cross, 72/216 cross blocked**. Blocking messages worsened offline validation error in all 3 seeds; learned message path was used but **did not beat independently trained local-only model in overall closed-loop success**. [D6 full results](docs/research/2026-11-17-D6-local-information-results.md); [Actions SUCCESS](https://github.com/Kryponitee/drive-like-a-living-system/actions/runs/44063406505).
 - **D6b local-information + output-loss pressure — SUCCESS, qualified positive**: 5832 episode records; after 1 of 8 output units is lesioned, successes **local 502/1728, cross 552/1728, cross-message blocked 471/1728**. Healthy local/cross/blocked = 74/216,76/216,77/216. Communication is useful but advantage is seed/density dependent and does not prove injured-motor relay. [D6b science report and D6c preregistration](docs/research/2026-11-17-D6b-results-and-D6c-plan.md); [Actions SUCCESS](https://github.com/Kryponitee/drive-like-a-living-system/actions/runs/44065039363).
 - **D6c targeted damaged-sender message relay — SUCCESS, no positive replicated relay effect**: 1800 episodes; 3 frozen D6b-cross checkpoints × 2 densities × 12 new scenes × 25 paired conditions. Mean lesion-specific sender-message interaction was **−3.30 pp success** and **−10.76 reward** across six seed×density cells; only 3/6 and 2/6 cells respectively were positive. This does not support the hypothesis that the output-disabled unit's own message is specially required for takeover. [Full result + action-interface audit](docs/research/2026-11-17-D6c-sender-relay-results-and-action-audit.md); [Actions SUCCESS](https://github.com/Kryponitee/drive-like-a-living-system/actions/runs/44067548142).
-- **Critical scope correction before D7**: D1–D6c actually used MetaDrive's default action `[steering, signed throttle_brake]`, not the intended two independent absolute outputs `[throttle, brake]`. D1 code labels the dimensions `steer` and `pedal`; official MetaDrive docs confirm this mapping. The completed experiments remain valid for that interface but do not establish coordination for the intended two-pedal system. **Pause new training until the steering controller / action adapter is specified and the dataset is rebuilt for the correct interface.**
+- **Historical interface scope**: D1–D6c used MetaDrive's default `[steering, signed throttle_brake]`. Those completed results remain in the history with their original interpretations, but they are not evidence for the corrected `[throttle, brake]` task. The new adapter and action space are validated in D0′; old checkpoints/data are not reused.
 
 ## Previous records (retained for provenance)
 
