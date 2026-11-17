@@ -1,0 +1,233 @@
+name: DLS D4a train capacity-matched feedforward BC and evaluate paired C
+
+on:
+  push:
+    paths:
+      - .github/workflows/d4a-feedforward-control.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: dls-d4a-capacity-matched-feedforward
+  cancel-in-progress: false
+
+jobs:
+  capacity-matched:
+    runs-on: [self-hosted, Linux, X64]
+    timeout-minutes: 90
+    env:
+      DLS_DATA_ROOT: /mnt/datasets/lxb/dls
+      DLS_ENV: /home/ps/miniconda3/envs/dls-p0
+      TMPDIR: /mnt/datasets/lxb/dls/tmp
+      XDG_CACHE_HOME: /mnt/datasets/lxb/dls/cache/xdg
+      PYTHONNOUSERSITE: "1"
+      OMP_NUM_THREADS: "1"
+      OPENBLAS_NUM_THREADS: "1"
+      MKL_NUM_THREADS: "1"
+      NUMEXPR_NUM_THREADS: "1"
+      DLS_D4A_TRAINING: "1"
+    steps:
+      - name: Validate reused data and frozen recurrent C checkpoints, refuse overwrites
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(findmnt -n -o TARGET -T "$DLS_DATA_ROOT")" = "/mnt/datasets"
+          test -s "$DLS_DATA_ROOT/demonstrations/d1-v1/train/worker-00-density-0.00.npz"
+          test -s "$DLS_DATA_ROOT/reports/d3e/d3e-summary.json"
+          "$DLS_ENV/bin/python" -c "import torch; assert torch.cuda.device_count() >= 3"
+          for seed in 42 43 44; do
+            test -s "$DLS_DATA_ROOT/checkpoints/d1-v1/C-seed$seed.pt"
+            test -s "$DLS_DATA_ROOT/reports/d1/train-C-seed$seed.json"
+            test ! -e "$DLS_DATA_ROOT/checkpoints/d4a/F-seed$seed.pt"
+            test ! -e "$DLS_DATA_ROOT/reports/d4a/train-F-seed$seed.json"
+          done
+          test ! -e "$DLS_DATA_ROOT/reports/d4a/d4a-summary.json"
+          mkdir -p "$TMPDIR" "$DLS_DATA_ROOT/reports/d4a/logs"
+          sha256sum "$DLS_DATA_ROOT/checkpoints/d1-v1/"C-seed{42,43,44}.pt > "$DLS_DATA_ROOT/reports/d4a/original-C-sha256-before.txt"
+          df -h "$DLS_DATA_ROOT"
+
+      - name: Reuse D1 BC dataset loader and frozen controller source
+        shell: bash
+        run: |
+          set -euo pipefail
+          for item in "src/dls_p0.py:dls_p0.py" \
+                      "src/dls_feedforward.py:dls_feedforward.py" \
+                      "scripts/d1_bc.py:d1_bc.py" \
+                      "scripts/d4a_train_ff_bc.py:d4a_train_ff_bc.py" \
+                      "scripts/d4a_eval_feedforward_vs_C.py:d4a_eval_feedforward_vs_C.py"; do
+            SRC="${item%%:*}"
+            NAME="${item#*:}"
+            RAW="https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/${GITHUB_SHA}/$SRC"
+            OK=0
+            for URL in "https://gh-proxy.com/$RAW" "https://ghproxy.net/$RAW" "$RAW"; do
+              if curl -fLsS --connect-timeout 10 --max-time 60 "$URL" -o "$TMPDIR/$NAME"; then
+                OK=1
+                break
+              fi
+            done
+            test "$OK" = 1
+            "$DLS_ENV/bin/python" -m py_compile "$TMPDIR/$NAME"
+          done
+          "$DLS_ENV/bin/python" - <<'PY'
+          import os,sys,torch
+          sys.path.insert(0,os.environ["TMPDIR"])
+          from dls_p0 import model_info,nparams
+          from dls_feedforward import FeedforwardController,num_params
+          c=nparams(model_info("C")[0]); f=num_params(FeedforwardController())
+          assert c==114390 and f==114477
+          assert abs(f/c-1)<0.001
+          model=FeedforwardController()
+          with torch.no_grad():
+              x=torch.randn(2,40,259)
+              y=model(x)
+              assert y.shape==(2,40,2)
+              torch.testing.assert_close(y[:,0],model(x[:,0]),rtol=0.0,atol=0.0)
+          print("D4a preflight passed: F",f,"vs C",c)
+          PY
+          sha256sum "$TMPDIR/dls_feedforward.py" "$TMPDIR/d4a_train_ff_bc.py" "$TMPDIR/d4a_eval_feedforward_vs_C.py"
+
+      - name: Train F from scratch at seeds 42 43 44 on 3 independent GPUs
+        shell: bash
+        run: |
+          set -euo pipefail
+          declare -a PIDS=()
+          declare -a SEEDS=(42 43 44)
+          for i in "${!SEEDS[@]}"; do
+            seed="${SEEDS[$i]}"
+            "$DLS_ENV/bin/python" "$TMPDIR/d4a_train_ff_bc.py" --seed "$seed" --gpu "$i" \
+              > "$DLS_DATA_ROOT/reports/d4a/logs/train-seed$seed.log" 2>&1 &
+            PIDS+=("$!")
+          done
+          failed=0
+          for i in "${!PIDS[@]}"; do
+            seed="${SEEDS[$i]}"
+            if wait "${PIDS[$i]}"; then
+              echo "PASS F seed$seed"
+              tail -2 "$DLS_DATA_ROOT/reports/d4a/logs/train-seed$seed.log"
+            else
+              echo "FAIL F seed$seed"
+              tail -90 "$DLS_DATA_ROOT/reports/d4a/logs/train-seed$seed.log"
+              failed=1
+            fi
+          done
+          test "$failed" = 0
+
+      - name: Evaluate F and unchanged C on 24 never-before-tested seeds and 3 densities, 54 CPU workers
+        shell: bash
+        run: |
+          set -euo pipefail
+          declare -a PIDS=()
+          declare -a NAMES=()
+          for seed in 42 43 44; do
+            for variant in C F; do
+              for density in 0.00 0.10 0.25; do
+                for shard in 0 1 2; do
+                  name="$variant-seed$seed-density$density-shard$shard"
+                  "$DLS_ENV/bin/python" "$TMPDIR/d4a_eval_feedforward_vs_C.py" \
+                    --variant "$variant" --seed "$seed" --density "$density" --shard "$shard" \
+                    > "$DLS_DATA_ROOT/reports/d4a/logs/eval-$name.log" 2>&1 &
+                  PIDS+=("$!")
+                  NAMES+=("$name")
+                done
+              done
+            done
+          done
+          test "${#PIDS[@]}" -eq 54
+          failed=0
+          for i in "${!PIDS[@]}"; do
+            if wait "${PIDS[$i]}"; then
+              echo "PASS ${NAMES[$i]}"
+              tail -1 "$DLS_DATA_ROOT/reports/d4a/logs/eval-${NAMES[$i]}.log"
+            else
+              echo "FAIL ${NAMES[$i]}"
+              tail -80 "$DLS_DATA_ROOT/reports/d4a/logs/eval-${NAMES[$i]}.log"
+              failed=1
+            fi
+          done
+          test "$failed" = 0
+
+      - name: Check original weights and aggregate all paired results without pseudoreplication
+        shell: bash
+        run: |
+          set -euo pipefail
+          sha256sum "$DLS_DATA_ROOT/checkpoints/d1-v1/"C-seed{42,43,44}.pt > "$DLS_DATA_ROOT/reports/d4a/original-C-sha256-after.txt"
+          cmp "$DLS_DATA_ROOT/reports/d4a/original-C-sha256-before.txt" "$DLS_DATA_ROOT/reports/d4a/original-C-sha256-after.txt"
+          "$DLS_ENV/bin/python" - <<'PY'
+          import json,numpy as np
+          from pathlib import Path
+          root=Path("/mnt/datasets/lxb/dls/reports")
+          summary={
+              "stage":"D4a matched-parameter independently trained feedforward vs frozen recurrent C",
+              "model_seeds":[42,43,44],
+              "evaluation_seeds":list(range(34000,34024)),
+              "traffic_densities":[0.0,0.1,0.25],
+              "new_closed_loop_episodes":432,
+              "train_data_reused":True,
+              "old_C_checkpoints_unchanged":True,
+              "models_are_not_FLOPs_matched":True,
+              "paired_by_training_seed_and_scene":True,
+              "training":{},"results":{}
+          }
+          for seed in (42,43,44):
+              ft=json.loads((root/f"d4a/train-F-seed{seed}.json").read_text())
+              ct=json.loads((root/f"d1/train-C-seed{seed}.json").read_text())
+              assert ft["train_steps"]==ct["train_steps"]==91717
+              assert ft["val_steps"]==ct["val_steps"]==9822
+              assert ft["epochs"]==ct["epochs"]==8
+              assert ft["batch_size"]==ct["batch_size"]==48
+              summary["training"][str(seed)]={
+                  "F_val_huber":ft["validation_best_huber"],
+                  "C_val_huber":ct["best_val_huber"],
+                  "F_params":ft["params_F"],"C_params":ft["params_C"],
+                  "F_optimizer_updates":ft["optimizer_updates"],
+              }
+              summary["results"][str(seed)]={}
+              for density in (0.0,0.1,0.25):
+                  grouped={}
+                  for variant in ("C","F"):
+                      episodes=[]
+                      for shard in range(3):
+                          path=root/f"d4a/eval/{variant}-seed{seed}-density{density:.2f}-shard{shard}.json"
+                          r=json.loads(path.read_text())
+                          assert r["trained_seed"]==seed and r["variant"]==variant
+                          assert r["density"]==density and r["num_episodes"]==8
+                          episodes.extend(r["episodes"])
+                      assert [e["seed"] for e in episodes]==list(range(34000,34024))
+                      grouped[variant]=episodes
+                  c,f=grouped["C"],grouped["F"]
+                  c_success=sum(e["success"] for e in c)
+                  f_success=sum(e["success"] for e in f)
+                  c_reward=float(np.mean([e["reward"] for e in c]))
+                  f_reward=float(np.mean([e["reward"] for e in f]))
+                  reward_delta=[a["reward"]-b["reward"] for a,b in zip(f,c)]
+                  summary["results"][str(seed)][f"{density:.2f}"]={
+                      "C_success_out_of_24":c_success,
+                      "F_success_out_of_24":f_success,
+                      "F_minus_C_success":f_success-c_success,
+                      "F_only_success":sum(a["success"] and not b["success"] for a,b in zip(f,c)),
+                      "C_only_success":sum(b["success"] and not a["success"] for a,b in zip(f,c)),
+                      "C_mean_reward":c_reward,"F_mean_reward":f_reward,
+                      "F_minus_C_mean_reward":f_reward-c_reward,
+                      "F_minus_C_paired_reward_delta":reward_delta,
+                      "C_mean_completion":float(np.mean([e["route_completion"] for e in c])),
+                      "F_mean_completion":float(np.mean([e["route_completion"] for e in f])),
+                      "C_collision":sum(e["collision"] for e in c),
+                      "F_collision":sum(e["collision"] for e in f),
+                      "C_offroad":sum(e["offroad"] for e in c),
+                      "F_offroad":sum(e["offroad"] for e in f),
+                  }
+                  r=summary["results"][str(seed)][f"{density:.2f}"]
+                  print(f"D4a seed{seed} density={density:.2f} success C/F {c_success}/{f_success}; F-C success {f_success-c_success}; F-C reward {r['F_minus_C_mean_reward']:.2f}")
+          out=root/"d4a/d4a-summary.json"
+          assert not out.exists()
+          out.write_text(json.dumps(summary,ensure_ascii=False,indent=2),encoding="utf-8")
+          PY
+          {
+            echo "## D4a: independently trained feedforward BC vs frozen C"
+            echo "- MLP 114477 params vs C 114390 params; SAME D1 data/BC recipe and three seeds"
+            echo "- 432 NEW paired closed-loop episodes, 24 NEW scenes x 3 densities x 3 seeds x 2 variants"
+            echo "- Reused expert data, unchanged C weights, 3 GPUs + 54 CPU simulator processes"
+            echo "- Summary: `$DLS_DATA_ROOT/reports/d4a/d4a-summary.json`"
+          } >> "$GITHUB_STEP_SUMMARY"
