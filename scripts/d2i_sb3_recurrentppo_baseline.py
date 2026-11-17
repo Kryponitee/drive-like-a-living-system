@@ -26,9 +26,25 @@ EVAL_SEEDS = list(range(5400, 5412))
 N_ENVS = 4
 
 
+class SeedRangeMetaDriveEnv(MetaDriveEnv):
+    """Translate SB3's global seed into this worker's MetaDrive seed range."""
+
+    def reset(self, *, seed=None, options=None):
+        if seed is not None:
+            start = int(self.start_index)
+            n = int(self.num_scenarios)
+            assert n > 0
+            original = int(seed)
+            if not (start <= original < start + n):
+                seed = start + (original % n)
+                print(f"SB3 seed mapping: requested={original} -> MetaDrive={seed}, "
+                      f"allowed=[{start},{start + n})", flush=True)
+        return super().reset(seed=seed, options=options)
+
+
 def make_env(worker_index):
     # Called only inside a worker process after 'spawn'; no shared Panda3D engine.
-    return MetaDriveEnv({
+    return SeedRangeMetaDriveEnv({
         "use_render": False,
         "image_observation": False,
         "traffic_density": TRAIN_DENSITY,
