@@ -1,0 +1,92 @@
+name: DLS D0-prime audit longitudinal teacher under dual pedals
+
+on:
+  push:
+    paths:
+      - .github/workflows/d0-dual-pedal-teacher-audit.yml
+      - scripts/d0_dual_pedal_teacher_audit.py
+      - src/dls_dual_pedal_adapter.py
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: dls-d0-dual-pedal-teacher-audit
+  cancel-in-progress: false
+
+jobs:
+  teacher-audit:
+    runs-on: [self-hosted, Linux, X64]
+    timeout-minutes: 35
+    env:
+      DLS_DATA_ROOT: /mnt/datasets/lxb/dls
+      DLS_ENV: /home/ps/miniconda3/envs/dls-p0
+      TMPDIR: /mnt/datasets/lxb/dls/tmp
+      XDG_CACHE_HOME: /mnt/datasets/lxb/dls/cache/xdg
+      PYTHONNOUSERSITE: "1"
+      OMP_NUM_THREADS: "1"
+      OPENBLAS_NUM_THREADS: "1"
+      MKL_NUM_THREADS: "1"
+      NUMEXPR_NUM_THREADS: "1"
+    steps:
+      - name: Verify runner and immutable output paths
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(findmnt -n -o TARGET -T "$DLS_DATA_ROOT")" = "/mnt/datasets"
+          test -x "$DLS_ENV/bin/python"
+          test -s "$DLS_DATA_ROOT/metadrive_assets/version.txt"
+          test ! -e "$DLS_DATA_ROOT/reports/d0-dual-pedal/teacher-audit-${GITHUB_RUN_ID}.json"
+          test ! -e "$DLS_DATA_ROOT/demonstrations/d0-dual-pedal/expert-probe-${GITHUB_RUN_ID}.npz"
+          mkdir -p "$TMPDIR" "$DLS_DATA_ROOT/reports/d0-dual-pedal" "$DLS_DATA_ROOT/demonstrations/d0-dual-pedal"
+          df -h "$DLS_DATA_ROOT"
+
+      - name: Download and compile exact source
+        shell: bash
+        run: |
+          set -euo pipefail
+          for item in "src/dls_dual_pedal_adapter.py:dls_dual_pedal_adapter.py" \
+                      "scripts/d0_dual_pedal_teacher_audit.py:d0_dual_pedal_teacher_audit.py"; do
+            SRC="${item%%:*}"
+            NAME="${item#*:}"
+            RAW="https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/${GITHUB_SHA}/$SRC"
+            OK=0
+            for URL in "https://gh-proxy.com/$RAW" "https://ghproxy.net/$RAW" "$RAW"; do
+              if curl -fLsS --connect-timeout 10 --max-time 60 "$URL" -o "$TMPDIR/$NAME"; then
+                OK=1
+                break
+              fi
+            done
+            test "$OK" = 1
+            "$DLS_ENV/bin/python" -m py_compile "$TMPDIR/$NAME"
+          done
+          sha256sum "$TMPDIR/dls_dual_pedal_adapter.py" "$TMPDIR/d0_dual_pedal_teacher_audit.py"
+
+      - name: Collect 12 paired-context teacher episodes
+        shell: bash
+        run: |
+          set -euo pipefail
+          "$DLS_ENV/bin/python" "$TMPDIR/d0_dual_pedal_teacher_audit.py" | tee "$DLS_DATA_ROOT/reports/d0-dual-pedal/teacher-console-${GITHUB_RUN_ID}.log"
+          REPORT="$DLS_DATA_ROOT/reports/d0-dual-pedal/teacher-audit-${GITHUB_RUN_ID}.json"
+          DATA="$DLS_DATA_ROOT/demonstrations/d0-dual-pedal/expert-probe-${GITHUB_RUN_ID}.npz"
+          test -s "$REPORT"
+          test -s "$DATA"
+          "$DLS_ENV/bin/python" - <<'PY'
+          import json, os
+          p=os.path.join(os.environ["DLS_DATA_ROOT"],"reports","d0-dual-pedal","teacher-audit-"+os.environ["GITHUB_RUN_ID"]+".json")
+          r=json.load(open(p))
+          assert r["num_episodes"] == 12 and r["num_transitions"] > 0
+          assert r["action_interface"] == "[absolute_throttle, absolute_brake] in [0,1]^2"
+          print("Teacher audit complete; gate:", r["teacher_gate"]["passed"])
+          print("success:", r["success_rate"], "by density:", r["success_rate_by_density"])
+          print("brake fraction:", r["brake_step_fraction"], "brake steps:", r["brake_active_steps"])
+          PY
+          {
+            printf '%s\n' "## DLS D0-prime teacher audit"
+            printf '%s\n' "- 12 episodes across 3 traffic densities; fixed zero steering"
+            printf '%s\n' "- Teacher pedal split into independent absolute throttle/brake targets"
+            printf '%s\n' "- Gate is reported from success coverage and brake-label coverage; no training"
+            printf '%s\n' "- Report: `$REPORT`"
+            printf '%s\n' "- Probe dataset: `$DATA`"
+          } >> "$GITHUB_STEP_SUMMARY"
