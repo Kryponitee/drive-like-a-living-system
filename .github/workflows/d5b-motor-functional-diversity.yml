@@ -1,0 +1,122 @@
+name: DLS D5b audit whether robust eight-motor redundancy is merely duplicated activity
+
+on:
+  push:
+    paths:
+      - .github/workflows/d5b-motor-functional-diversity.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: dls-d5b-motor-functional-diversity
+  cancel-in-progress: false
+
+jobs:
+  frozen-motor-audit:
+    runs-on: [self-hosted, Linux, X64]
+    timeout-minutes: 45
+    env:
+      DLS_DATA_ROOT: /mnt/datasets/lxb/dls
+      DLS_ENV: /home/ps/miniconda3/envs/dls-p0
+      TMPDIR: /mnt/datasets/lxb/dls/tmp
+      XDG_CACHE_HOME: /mnt/datasets/lxb/dls/cache/xdg
+      PYTHONNOUSERSITE: "1"
+      OMP_NUM_THREADS: "1"
+      OPENBLAS_NUM_THREADS: "1"
+      MKL_NUM_THREADS: "1"
+      NUMEXPR_NUM_THREADS: "1"
+    steps:
+      - name: Check original D5a results and frozen six trained models
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(findmnt -n -o TARGET -T "$DLS_DATA_ROOT")" = "/mnt/datasets"
+          test -s "$DLS_DATA_ROOT/reports/d5a/d5a-summary.json"
+          test ! -e "$DLS_DATA_ROOT/reports/d5b/d5b-summary.json"
+          mkdir -p "$TMPDIR" "$DLS_DATA_ROOT/reports/d5b/logs"
+          for seed in 42 43 44; do
+            for arm in clean robust; do
+              test -s "$DLS_DATA_ROOT/checkpoints/d5a/$arm-seed$seed.pt"
+            done
+            test ! -e "$DLS_DATA_ROOT/reports/d5b/motor-diversity-seed$seed.json"
+          done
+          sha256sum "$DLS_DATA_ROOT/checkpoints/d5a/"{clean,robust}-seed{42,43,44}.pt > "$DLS_DATA_ROOT/reports/d5b/d5a-sha256-before.txt"
+
+      - name: Fetch pinned model and diagnostic scripts
+        shell: bash
+        run: |
+          set -euo pipefail
+          for item in "src/dls_p0.py:dls_p0.py" \
+                      "src/dls_motor_redundancy.py:dls_motor_redundancy.py" \
+                      "scripts/d1_bc.py:d1_bc.py" \
+                      "scripts/d5b_motor_functional_diversity.py:d5b_motor_functional_diversity.py" \
+                      "scripts/d5b_aggregate_diversity.py:d5b_aggregate_diversity.py"; do
+            SRC="${item%%:*}"
+            NAME="${item#*:}"
+            RAW="https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/${GITHUB_SHA}/$SRC"
+            OK=0
+            for URL in "https://gh-proxy.com/$RAW" "https://ghproxy.net/$RAW" "$RAW"; do
+              if curl -fLsS --connect-timeout 10 --max-time 60 "$URL" -o "$TMPDIR/$NAME"; then
+                OK=1
+                break
+              fi
+            done
+            test "$OK" = 1
+            "$DLS_ENV/bin/python" -m py_compile "$TMPDIR/$NAME"
+          done
+          "$DLS_ENV/bin/python" - <<'PY'
+          import sys,os,torch
+          sys.path.insert(0,os.environ["TMPDIR"])
+          from d5b_motor_functional_diversity import spectrum_metrics
+          a=torch.randn(2000,8).numpy()
+          r=spectrum_metrics(a)
+          assert 5.0 < r["standardized_effective_rank"] <= 8.00001
+          b=torch.randn(2000,1).numpy()
+          import numpy as np
+          ones=np.repeat(b,8,axis=1)
+          one=spectrum_metrics(ones)
+          assert 0.999 < one["standardized_first_pc_explained"] <= 1.00001
+          print("D5b preflight: independent activity rank >5; identical activity firstPC ~=1")
+          PY
+
+      - name: Audit three seeds with six original frozen models and reused heldout observations
+        shell: bash
+        run: |
+          set -euo pipefail
+          declare -a PIDS=()
+          for seed in 42 43 44; do
+            "$DLS_ENV/bin/python" "$TMPDIR/d5b_motor_functional_diversity.py" --seed "$seed" \
+              > "$DLS_DATA_ROOT/reports/d5b/logs/seed$seed.log" 2>&1 &
+            PIDS+=("$!")
+          done
+          failed=0
+          declare -a SEEDS=(42 43 44)
+          for i in "${!PIDS[@]}"; do
+            seed="${SEEDS[$i]}"
+            if wait "${PIDS[$i]}"; then
+              echo "PASS D5b seed$seed"
+              cat "$DLS_DATA_ROOT/reports/d5b/logs/seed$seed.log"
+            else
+              echo "FAIL D5b seed$seed"
+              tail -100 "$DLS_DATA_ROOT/reports/d5b/logs/seed$seed.log"
+              failed=1
+            fi
+          done
+          test "$failed" -eq 0
+
+      - name: Verify checkpoints unchanged and aggregate activity functional diversity
+        shell: bash
+        run: |
+          set -euo pipefail
+          sha256sum "$DLS_DATA_ROOT/checkpoints/d5a/"{clean,robust}-seed{42,43,44}.pt > "$DLS_DATA_ROOT/reports/d5b/d5a-sha256-after.txt"
+          cmp "$DLS_DATA_ROOT/reports/d5b/d5a-sha256-before.txt" "$DLS_DATA_ROOT/reports/d5b/d5a-sha256-after.txt"
+          "$DLS_ENV/bin/python" "$TMPDIR/d5b_aggregate_diversity.py"
+          {
+            printf '%s\n' "## D5b frozen redundant motor functional diversity"
+            printf '%s\n' "- Reused 6 intact trained D5a checkpoints and D1 9822 heldout validation timesteps"
+            printf '%s\n' "- 8-unit activity rank, normalized PCA, pairwise correlation, contribution diversity"
+            printf '%s\n' "- No new training, no overwrites, all original checkpoint SHA256 unchanged"
+            printf '%s\n' "- Summary /mnt/datasets/lxb/dls/reports/d5b/d5b-summary.json"
+          } >> "$GITHUB_STEP_SUMMARY"
