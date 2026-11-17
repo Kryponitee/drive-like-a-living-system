@@ -1,0 +1,109 @@
+name: DLS D2l optimizer-inclusive 32 vs 64 PPO worker gate
+
+on:
+  push:
+    paths:
+      - .github/workflows/d2l-optimizer-inclusive.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: dls-d2l-optimizer-inclusive
+  cancel-in-progress: false
+
+jobs:
+  cpu_train_throughput:
+    runs-on: [self-hosted, Linux, X64]
+    timeout-minutes: 35
+    env:
+      DLS_DATA_ROOT: /mnt/datasets/lxb/dls
+      SB3_VENV: /home/ps/miniconda3/envs/dls-sb3-compat
+      TMPDIR: /mnt/datasets/lxb/dls/tmp
+      XDG_CACHE_HOME: /mnt/datasets/lxb/dls/cache/xdg
+      PYTHONNOUSERSITE: "1"
+      OMP_NUM_THREADS: "1"
+      OPENBLAS_NUM_THREADS: "1"
+      MKL_NUM_THREADS: "1"
+      NUMEXPR_NUM_THREADS: "1"
+    steps:
+      - name: Verify official checkpoint, isolated environment and previous 64-worker benchmark
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(findmnt -n -o TARGET -T "$DLS_DATA_ROOT")" = "/mnt/datasets"
+          test "$(findmnt -n -o TARGET -T "$SB3_VENV")" = "/"
+          test -x "$SB3_VENV/bin/python"
+          test -f "$DLS_DATA_ROOT/checkpoints/d2j/official-recurrentppo-300k.zip"
+          test -f "$DLS_DATA_ROOT/checkpoints/d2j/official-recurrentppo-vecnormalize-300k.pkl"
+          test -f "$DLS_DATA_ROOT/reports/d2k-extended/worker-scaling-summary.json"
+          test "$(nproc --all)" -ge 64
+          test "$(df -Pk "$DLS_DATA_ROOT" | awk 'NR==2 {print $4}')" -gt 10485760
+          mkdir -p "$TMPDIR" "$DLS_DATA_ROOT/reports/d2l"
+          test ! -e "$DLS_DATA_ROOT/reports/d2l/optimizer-inclusive-scaling-summary.json"
+          "$SB3_VENV/bin/python" - <<'PY'
+          import torch, gymnasium, stable_baselines3, sb3_contrib, psutil, json
+          from pathlib import Path
+          assert torch.__version__.startswith("2.5.1")
+          assert gymnasium.__version__=="1.1.1"
+          assert stable_baselines3.__version__==sb3_contrib.__version__=="2.6.0"
+          assert psutil.virtual_memory().available > 70*1024**3
+          report=json.loads(Path("/mnt/datasets/lxb/dls/reports/d2k-extended/worker-scaling-summary.json").read_text())
+          assert report["worker_counts_tested"]==[32,48,64]
+          print("Available logical CPUs:",psutil.cpu_count(logical=True))
+          print("Free RAM GiB:",round(psutil.virtual_memory().available/1024**3,1))
+          print("Historical frozen sampler:",[(p["workers"],round(p["aggregate_steps_per_second"])) for p in report["results"]])
+          PY
+
+      - name: Download only the precise versioned optimizer-inclusive benchmark
+        shell: bash
+        run: |
+          set -euo pipefail
+          RAW="https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/${GITHUB_SHA}/scripts/d2l_optimizer_inclusive_scaling.py"
+          OK=0
+          for URL in "https://gh-proxy.com/$RAW" "https://ghproxy.net/$RAW" "$RAW"; do
+            if curl -fLsS --connect-timeout 10 --max-time 60 "$URL" -o "$TMPDIR/d2l_full_ppo.py"; then
+              OK=1
+              break
+            fi
+          done
+          test "$OK" = 1
+          "$SB3_VENV/bin/python" -m py_compile "$TMPDIR/d2l_full_ppo.py"
+          sha256sum "$TMPDIR/d2l_full_ppo.py"
+
+      - name: Run official PPO collection plus backward optimizer with 32 and 64 workers
+        shell: bash
+        run: |
+          set -euo pipefail
+          "$SB3_VENV/bin/python" "$TMPDIR/d2l_full_ppo.py"
+          "$SB3_VENV/bin/python" - <<'PY'
+          import json
+          from pathlib import Path
+          p=Path("/mnt/datasets/lxb/dls/reports/d2l/optimizer-inclusive-scaling-summary.json")
+          report=json.loads(p.read_text())
+          assert report["sequential_worker_settings"]==[32,64]
+          assert report["matched_environment_steps_each"]==16384
+          assert report["source_weights_unchanged"]
+          assert report["selected_workers_by_prespecified_10pct_gate"] in (32,64)
+          for n,r in zip((32,64), report["results"]):
+              assert r["workers"]==n
+              assert r["total_additional_environment_frames"]==16384
+              assert r["final_model_frames_in_memory_only"]==316416
+              assert r["approx_optimizer_minibatches"]==512
+              assert r["frames_per_second_end_to_end"]>0
+          print("FINAL D2l optimizer-inclusive throughput:")
+          for r in report["results"]:
+              print(r["workers"],"workers:",round(r["frames_per_second_end_to_end"],1),"frames/sec;",
+                    round(r["wall_seconds_rollout_collection"],1),"s environment collection;",
+                    round(r["wall_seconds_non_collection_including_backward_optimizer"],1),"s network/optimizer")
+          print("selected:",report["selected_workers_by_prespecified_10pct_gate"])
+          PY
+          {
+            echo "## D2l final 32-vs-64 PPO full-training throughput"
+            echo "- Official 300k checkpoint + VecNormalize reused independently; training update weights discarded"
+            echo "- 16,384 environment steps per condition, equivalent nominal 512 PPO minibatches"
+            echo "- Samples plus backwards/optimizer measured separately; no previous checkpoints modified"
+            echo "- Result: \`$DLS_DATA_ROOT/reports/d2l/optimizer-inclusive-scaling-summary.json\`"
+            echo "- Next D2m custom A/B/C state adapter then D2n scientific training; no new infrastructure exploration by default"
+          } >> "$GITHUB_STEP_SUMMARY"
