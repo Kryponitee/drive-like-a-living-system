@@ -45,3 +45,27 @@
 - 800 步样本：`/mnt/datasets/lxb/dls/demonstrations/d0-expert-probe-h800.npz`
 
 **下一步**：评估 9 个成功 episode 是否覆盖 P0 要研究的运动情境，并基于成功轨迹、独立场景划分生成正式 D1 教师数据；在此之前不从这些小样本得出学习或协调结论。GPU PyTorch 运行时另行验证。
+
+
+## GPU 运行时审计（已完成）
+
+GitHub Actions #44004713319：**SUCCESS**。在系统盘 Conda 环境 `/home/ps/miniconda3/envs/dls-p0` 中完成：
+
+- PyTorch `2.5.1+cu124`，CUDA Runtime 12.4；
+- TensorBoard `2.21.0`；
+- 检出 8 张 NVIDIA GeForce RTX 4090；
+- `torch.cuda.is_available() == True`，单卡 CUDA 上随机矩阵乘法及有限值断言通过；
+- `pip check` 无 broken requirements。
+
+报告位置：`/mnt/datasets/lxb/dls/reports/d0/gpu_runtime.json`；
+安装依赖冻结：`/mnt/datasets/lxb/dls/reports/d0/pip_freeze.txt`。
+
+这仅验证 **GPU 计算与 Python 环境**，不等于 A/B/C 控制模型、训练或模块化协调实验已完成。
+
+## D0c 后续数据覆盖检查（已启动，待结果）
+
+对同 12 个 pilot seeds，保持专家/地图/800 步上限不变，仅将交通密度在 0.00 / 0.10 / 0.25 切换。分别报告成功、碰撞、超时、转向/制动动作比例。**动作比例仅是覆盖代理，不能证明发生了跟车、换道或扰动恢复。**
+
+- Workflow: https://github.com/Kryponitee/drive-like-a-living-system/actions/runs/44005436462
+- 结果文件（待验证）：`/mnt/datasets/lxb/dls/reports/d0/expert_traffic_coverage.json`
+- 成功轨迹候选：`/mnt/datasets/lxb/dls/demonstrations/d0c_success_only/`
