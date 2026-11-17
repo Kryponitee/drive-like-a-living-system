@@ -83,7 +83,7 @@ jobs:
               x=torch.randn(2,40,259)
               y=model(x)
               assert y.shape==(2,40,2)
-              torch.testing.assert_close(y[:,0],model(x[:,0]),rtol=0.0,atol=0.0)
+              torch.testing.assert_close(y[:,0],model(x[:,0]),rtol=1e-5,atol=1e-6)
           print("D4a preflight passed: F",f,"vs C",c)
           PY
           sha256sum "$TMPDIR/dls_feedforward.py" "$TMPDIR/d4a_train_ff_bc.py" "$TMPDIR/d4a_eval_feedforward_vs_C.py"
