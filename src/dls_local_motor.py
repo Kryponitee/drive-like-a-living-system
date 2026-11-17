@@ -55,7 +55,7 @@ class LocalMotorController(nn.Module):
     def initial_state(self, batch_size, device):
         return torch.zeros(batch_size, MOTORS, HIDDEN, device=device)
 
-    def step(self, observation, state, t, block_messages=False, return_diagnostics=False):
+    def step(self, observation, state, t, block_messages=False, return_diagnostics=False, unit_mask=None):
         assert observation.ndim == 2 and observation.shape[-1] == OBS_DIM
         assert state.shape == (observation.shape[0], MOTORS, HIDDEN)
         local = (observation @ self.projection).reshape(-1, MOTORS, LOCAL_DIM)
@@ -75,7 +75,17 @@ class LocalMotorController(nn.Module):
             for i, cell in enumerate(self.cells)
         ], dim=1)
         activities = torch.cat([self.heads[i](updated[:, i]) for i in range(MOTORS)], dim=-1)
-        action = torch.tanh(F.linear(activities, self.decoder))
+        if unit_mask is not None:
+            mask = torch.as_tensor(unit_mask, device=activities.device, dtype=activities.dtype)
+            if mask.ndim == 1:
+                mask = mask.unsqueeze(0)
+            assert mask.ndim == 2 and mask.shape[1] == MOTORS
+            assert mask.shape[0] in (1, observation.shape[0])
+            assert bool(((mask == 0) | (mask == 1)).all())
+            activities_to_output = activities * mask
+        else:
+            activities_to_output = activities
+        action = torch.tanh(F.linear(activities_to_output, self.decoder))
         if return_diagnostics:
             return action, updated, {
                 "activities": activities,
@@ -85,13 +95,13 @@ class LocalMotorController(nn.Module):
         return action, updated
 
 
-def run_sequence(model, observations, block_messages=False):
+def run_sequence(model, observations, block_messages=False, unit_mask=None):
     assert observations.ndim == 3 and observations.shape[-1] == OBS_DIM
     batch_size, n_steps, _ = observations.shape
     state = model.initial_state(batch_size, observations.device)
     actions = []
     for t in range(n_steps):
-        action, state = model.step(observations[:, t], state, t, block_messages=block_messages)
+        action, state = model.step(observations[:, t], state, t, block_messages=block_messages, unit_mask=unit_mask)
         actions.append(action)
     return torch.stack(actions, dim=1)
 
