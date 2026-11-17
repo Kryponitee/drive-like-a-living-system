@@ -1,0 +1,106 @@
+name: DLS D2m plus official SB3-Contrib custom A B C PPO policy smoke
+
+on:
+  push:
+    paths:
+      - .github/workflows/d2m-official-policy-smoke.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: dls-d2m-official-policy-bridge
+  cancel-in-progress: false
+
+jobs:
+  check_bridge:
+    runs-on: [self-hosted, Linux, X64]
+    timeout-minutes: 18
+    env:
+      DLS_DATA_ROOT: /mnt/datasets/lxb/dls
+      SB3_VENV: /home/ps/miniconda3/envs/dls-sb3-compat
+      TMPDIR: /mnt/datasets/lxb/dls/tmp
+      XDG_CACHE_HOME: /mnt/datasets/lxb/dls/cache/xdg
+      PYTHONNOUSERSITE: "1"
+      OMP_NUM_THREADS: "1"
+      MKL_NUM_THREADS: "1"
+      OPENBLAS_NUM_THREADS: "1"
+      NUMEXPR_NUM_THREADS: "1"
+    steps:
+      - name: Check SB3 pinned baseline, original BC and D2m vectorized recurrence
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(findmnt -n -o TARGET -T "$DLS_DATA_ROOT")" = "/mnt/datasets"
+          test "$(findmnt -n -o TARGET -T "$SB3_VENV")" = "/"
+          test -f "$DLS_DATA_ROOT/reports/d2m/vector-state-summary.json"
+          test -f "$DLS_DATA_ROOT/reports/d2l/full-ppo-worker-comparison.json"
+          for variant in A B C; do
+            test -f "$DLS_DATA_ROOT/checkpoints/d1-v1/$variant-seed42.pt"
+          done
+          test ! -e "$DLS_DATA_ROOT/reports/d2m-official-policy/official-policy-bridge-smoke.json"
+          mkdir -p "$TMPDIR" "$DLS_DATA_ROOT/reports/d2m-official-policy"
+          "$SB3_VENV/bin/python" - <<'PY'
+          import torch, gymnasium, stable_baselines3, sb3_contrib
+          assert torch.__version__.startswith("2.5.1")
+          assert gymnasium.__version__=="1.1.1"
+          assert stable_baselines3.__version__==sb3_contrib.__version__=="2.6.0"
+          print("Official SB3-Contrib fixed bridge runtime valid")
+          PY
+
+      - name: Download original A B C and exact new state plus official policy adapter
+        shell: bash
+        run: |
+          set -euo pipefail
+          for item in "src/dls_p0.py:dls_p0.py" \
+                      "src/dls_recurrent_ppo.py:dls_recurrent_ppo.py" \
+                      "src/dls_vector_state_adapter.py:dls_vector_state_adapter.py" \
+                      "src/dls_sb3_recurrent_policy.py:dls_sb3_recurrent_policy.py" \
+                      "scripts/d2m_official_sb3_policy_smoke.py:d2m_official_policy_test.py"; do
+            SRC="${item%%:*}"
+            TARGET="${item#*:}"
+            RAW="https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/${GITHUB_SHA}/$SRC"
+            OK=0
+            for URL in "https://gh-proxy.com/$RAW" "https://ghproxy.net/$RAW" "$RAW"; do
+              if curl -fLsS --connect-timeout 10 --max-time 60 "$URL" -o "$TMPDIR/$TARGET"; then
+                OK=1
+                break
+              fi
+            done
+            test "$OK" -eq 1
+            "$SB3_VENV/bin/python" -m py_compile "$TMPDIR/$TARGET"
+            sha256sum "$TMPDIR/$TARGET"
+          done
+
+      - name: Validate official recurrent PPO buffered sequence and real MetaDrive policy update
+        shell: bash
+        run: |
+          set -euo pipefail
+          "$SB3_VENV/bin/python" "$TMPDIR/d2m_official_policy_test.py"
+          "$SB3_VENV/bin/python" - <<'PY'
+          import json
+          from pathlib import Path
+          p=Path("/mnt/datasets/lxb/dls/reports/d2m-official-policy/official-policy-bridge-smoke.json")
+          d=json.loads(p.read_text())
+          assert d["original_BC_models_preserved"]
+          assert d["official_ppo_rollout_buffer_and_loss_used"]
+          assert d["source_BC_checkpoint_sha256_unchanged"]
+          assert d["real_environment_frames"]==512
+          assert d["ppo_rollouts_checked"]==4
+          assert d["max_old_policy_replay_ratio_error"]<2e-3
+          assert d["actor_update_L1"]>0 and d["critic_update_L1"]>0
+          assert set(d["baseline_policy_tests"])==set("ABC")
+          assert all(r["unused_legacy_policy_trainable_params"]==0
+                     for r in d["baseline_policy_tests"].values())
+          print("Official SB3 Contrib native DLS GRU PPO bridge smoke PASS")
+          PY
+          {
+            echo "## D2m+ native A/B/C actor adapter into official RecurrentPPO"
+            echo "- A/B/C deterministic BC behavior matched, all share correct buffer state dimensions"
+            echo "- Original slow-clock per environment carried through SB3 2.6 recurrent rollouts"
+            echo "- Four real MetaDrive workers, 512 environment steps with actual official PPO updates"
+            echo "- Pre-update logprob ratio, actor and critic parameter updates verified"
+            echo "- No BC checkpoint writes, no package installs"
+            echo "- Output: \`$DLS_DATA_ROOT/reports/d2m-official-policy/official-policy-bridge-smoke.json\`"
+          } >> "$GITHUB_STEP_SUMMARY"
