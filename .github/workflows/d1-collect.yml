@@ -1,0 +1,150 @@
+name: DLS D1 expert dataset (27 parallel CPU workers)
+
+on:
+  push:
+    paths:
+      - .github/workflows/d1-collect.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: dls-d1-dataset-v1
+  cancel-in-progress: false
+
+jobs:
+  collect:
+    runs-on: [self-hosted, Linux, X64]
+    timeout-minutes: 80
+    env:
+      DLS_DATA_ROOT: /mnt/datasets/lxb/dls
+      DLS_ENV: /home/ps/miniconda3/envs/dls-p0
+      TMPDIR: /mnt/datasets/lxb/dls/tmp
+      XDG_CACHE_HOME: /mnt/datasets/lxb/dls/cache/xdg
+      PYTHONNOUSERSITE: "1"
+      OMP_NUM_THREADS: "1"
+      OPENBLAS_NUM_THREADS: "1"
+      MKL_NUM_THREADS: "1"
+      NUMEXPR_NUM_THREADS: "1"
+    steps:
+      - name: Check data disk and existing MetaDrive installation
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(findmnt -n -o TARGET -T "$DLS_DATA_ROOT")" = "/mnt/datasets"
+          test -x "$DLS_ENV/bin/python"
+          test -f "$DLS_DATA_ROOT/metadrive_assets/version.txt"
+          test -f "$DLS_DATA_ROOT/reports/d0/expert_interaction_exposure.json"
+          mkdir -p "$TMPDIR" "$DLS_DATA_ROOT/demonstrations/d1-v1/train" "$DLS_DATA_ROOT/demonstrations/d1-v1/val" "$DLS_DATA_ROOT/reports/d1"
+          test "$(df -Pk "$DLS_DATA_ROOT" | awk 'NR==2 {print $4}')" -gt 10485760
+          echo "Logical CPU cores: $(nproc)"
+          df -h "$DLS_DATA_ROOT"
+          "$DLS_ENV/bin/python" -c "import metadrive; import numpy; print('MetaDrive and NumPy import OK')"
+
+      - name: Download versioned collector to data disk
+        shell: bash
+        run: |
+          set -euo pipefail
+          SRC="https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/${GITHUB_SHA}/scripts/d1_collect.py"
+          RESULT=0
+          for URL in "https://gh-proxy.com/$SRC" "https://ghproxy.net/$SRC" "$SRC"; do
+            if curl -fLsS --connect-timeout 10 --max-time 60 "$URL" -o "$TMPDIR/d1_collect.py" &&
+              grep -q "episode_offsets" "$TMPDIR/d1_collect.py"; then
+              RESULT=1
+              break
+            fi
+          done
+          test "$RESULT" -eq 1
+          "$DLS_ENV/bin/python" -m py_compile "$TMPDIR/d1_collect.py"
+          sha256sum "$TMPDIR/d1_collect.py" > "$DLS_DATA_ROOT/reports/d1/collector-sha256.txt"
+
+      - name: Parallel success-only train + held-out validation collection
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$DLS_DATA_ROOT/reports/d1/collector-logs"
+          declare -a PIDS=()
+          declare -a NAMES=()
+          # 24 parallel workers x 16 train scenes = 384 independent train seeds.
+          for worker in $(seq 0 23); do
+            name="train-$(printf '%02d' "$worker")"
+            "$DLS_ENV/bin/python" "$TMPDIR/d1_collect.py" \
+              --split train --worker "$worker" --workers 24 --episodes-per-worker 16 \
+              > "$DLS_DATA_ROOT/reports/d1/collector-logs/$name.log" 2>&1 &
+            PIDS+=("$!")
+            NAMES+=("$name")
+          done
+          # 3 independent validation workers x 16 scenes = 48 held-out seeds.
+          for worker in $(seq 0 2); do
+            name="val-$(printf '%02d' "$worker")"
+            "$DLS_ENV/bin/python" "$TMPDIR/d1_collect.py" \
+              --split val --worker "$worker" --workers 3 --episodes-per-worker 16 \
+              > "$DLS_DATA_ROOT/reports/d1/collector-logs/$name.log" 2>&1 &
+            PIDS+=("$!")
+            NAMES+=("$name")
+          done
+          failed=0
+          for index in "${!PIDS[@]}"; do
+            if wait "${PIDS[$index]}"; then
+              echo "PASS: ${NAMES[$index]}"
+              tail -10 "$DLS_DATA_ROOT/reports/d1/collector-logs/${NAMES[$index]}.log"
+            else
+              echo "FAIL: ${NAMES[$index]}"
+              tail -55 "$DLS_DATA_ROOT/reports/d1/collector-logs/${NAMES[$index]}.log"
+              failed=1
+            fi
+          done
+          test "$failed" -eq 0
+          "$DLS_ENV/bin/python" - <<'PY'
+          import json
+          from pathlib import Path
+          root = Path("/mnt/datasets/lxb/dls/demonstrations/d1-v1")
+          results = {}
+          for split, workers in (("train", 24), ("val", 3)):
+              manifests = sorted((root / split).glob("worker-*.json"))
+              assert len(manifests) == workers, (split, len(manifests))
+              rows = [json.loads(p.read_text()) for p in manifests]
+              all_seeds = [e["seed"] for m in rows for e in m["episodes"]]
+              assert len(set(all_seeds)) == len(all_seeds)
+              results[split] = {
+                  "attempted": sum(m["num_attempted"] for m in rows),
+                  "success": sum(m["num_successful"] for m in rows),
+                  "collisions": sum(m["num_collision"] for m in rows),
+                  "saved_success_steps": sum(m["saved_success_steps"] for m in rows),
+                  "seed_min": min(all_seeds), "seed_max": max(all_seeds),
+                  "by_density": {
+                      str(d): {
+                          "attempted": sum(m["num_attempted"] for m in rows if m["density"] == d),
+                          "success": sum(m["num_successful"] for m in rows if m["density"] == d),
+                          "steps": sum(m["saved_success_steps"] for m in rows if m["density"] == d),
+                      }
+                      for d in (0.0, 0.1, 0.25)
+                  },
+              }
+          assert results["train"]["seed_max"] < results["val"]["seed_min"]
+          assert results["train"]["saved_success_steps"] >= 40000, "Insufficient examples: inspect expert and dataset instead of pretending ready"
+          report = {
+              "stage": "D1 expert data, not model result",
+              "train": results["train"], "val": results["val"],
+              "no_test_set_expert_trajectories_collected": True,
+              "test_seeds_reserved": "3000..3039",
+          }
+          out = Path("/mnt/datasets/lxb/dls/reports/d1/collection-summary.json")
+          out.write_text(json.dumps(report, indent=2), encoding="utf-8")
+          print(json.dumps(report, indent=2))
+          PY
+
+      - name: Report dataset location and capacity
+        shell: bash
+        run: |
+          set -euo pipefail
+          du -sh "$DLS_DATA_ROOT/demonstrations/d1-v1"
+          {
+            echo "## D1 dataset collection verified"
+            echo "- 24 CPU simulation workers train; 3 validation workers"
+            echo "- Same MetaDrive install reused; no new environments or downloads"
+            echo "- Successful-episode data only: \`$DLS_DATA_ROOT/demonstrations/d1-v1\`"
+            echo "- Summary: \`$DLS_DATA_ROOT/reports/d1/collection-summary.json\`"
+            echo "- Test seeds 3000..3039 were not sampled for BC."
+          } >> "$GITHUB_STEP_SUMMARY"
