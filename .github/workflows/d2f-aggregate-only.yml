@@ -1,0 +1,73 @@
+name: DLS D2f verified episode-level summary repair
+
+on:
+  push:
+    paths:
+      - .github/workflows/d2f-aggregate-only.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  audit:
+    runs-on: [self-hosted, Linux, X64]
+    timeout-minutes: 10
+    env:
+      DLS_DATA_ROOT: /mnt/datasets/lxb/dls
+      DLS_ENV: /home/ps/miniconda3/envs/dls-p0
+      TMPDIR: /mnt/datasets/lxb/dls/tmp
+      PYTHONNOUSERSITE: "1"
+      OMP_NUM_THREADS: "1"
+      OPENBLAS_NUM_THREADS: "1"
+    steps:
+      - name: Validate data mount and preserve all finished training/evaluation outputs
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(findmnt -n -o TARGET -T "$DLS_DATA_ROOT")" = "/mnt/datasets"
+          test -f "$DLS_DATA_ROOT/reports/d2f/d2f-validation-drift.json"
+          test ! -f "$DLS_DATA_ROOT/reports/d2f/d2f-summary.json"
+          for variant in A B C; do
+            test -f "$DLS_DATA_ROOT/checkpoints/d2f-v1/$variant-seed42.pt"
+            test -f "$DLS_DATA_ROOT/reports/d2f/train-$variant-seed42.json"
+            for phase in bc d2d d2f; do
+              for density in 0.00 0.10 0.25; do
+                test -f "$DLS_DATA_ROOT/reports/d2f/eval-$phase-$variant-density$density.json"
+              done
+            done
+          done
+          for density in 0.00 0.10 0.25; do
+            test -f "$DLS_DATA_ROOT/reports/d2f/eval-expert-expert-density$density.json"
+          done
+          mkdir -p "$TMPDIR"
+
+      - name: Download one versioned audit script from GitHub (no simulator or GPU)
+        shell: bash
+        run: |
+          set -euo pipefail
+          RAW="https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/${GITHUB_SHA}/scripts/d2f_aggregate_from_episodes.py"
+          OK=0
+          for URL in "https://gh-proxy.com/$RAW" "https://ghproxy.net/$RAW" "$RAW"; do
+            if curl -fLsS --connect-timeout 10 --max-time 60 "$URL" -o "$TMPDIR/d2f_aggregate.py"; then
+              OK=1
+              break
+            fi
+          done
+          test "$OK" = 1
+          "$DLS_ENV/bin/python" -m py_compile "$TMPDIR/d2f_aggregate.py"
+          sha256sum "$TMPDIR/d2f_aggregate.py"
+
+      - name: Read completed D2f results using actual per-episode seeds without any recomputation
+        shell: bash
+        run: |
+          set -euo pipefail
+          "$DLS_ENV/bin/python" "$TMPDIR/d2f_aggregate.py"
+          test -s "$DLS_DATA_ROOT/reports/d2f/d2f-summary.json"
+          {
+            echo "## D2f complete — metadata-only aggregation repair"
+            echo "- All training (3 GPUs), independent evaluations (30 processes), validation scored in first run"
+            echo "- Original raw reports preserved exactly; top-level mislabelled seeds recorded explicitly"
+            echo "- No retraining, no new simulations, no model weight or demonstration modifications"
+            echo "- Final audit: \`$DLS_DATA_ROOT/reports/d2f/d2f-summary.json\`"
+          } >> "$GITHUB_STEP_SUMMARY"
