@@ -1,0 +1,160 @@
+name: DLS D3a2 C direct message necessity norm-matched self substitute
+
+on:
+  push:
+    paths:
+      - .github/workflows/d3a2-cross-to-self.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: dls-d3a2-cross-message-necessity
+  cancel-in-progress: false
+
+jobs:
+  causal_content:
+    runs-on: [self-hosted, Linux, X64]
+    timeout-minutes: 22
+    env:
+      DLS_DATA_ROOT: /mnt/datasets/lxb/dls
+      DLS_ENV: /home/ps/miniconda3/envs/dls-p0
+      TMPDIR: /mnt/datasets/lxb/dls/tmp
+      PYTHONNOUSERSITE: "1"
+      OMP_NUM_THREADS: "1"
+      MKL_NUM_THREADS: "1"
+      OPENBLAS_NUM_THREADS: "1"
+      NUMEXPR_NUM_THREADS: "1"
+    steps:
+      - name: Verify previous C baseline and rotated messaging results, D1 BC frozen
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(findmnt -n -o TARGET -T "$DLS_DATA_ROOT")" = "/mnt/datasets"
+          test -f "$DLS_DATA_ROOT/reports/d3a/d3a-summary.json"
+          test -f "$DLS_DATA_ROOT/checkpoints/d1-v1/C-seed42.pt"
+          for density in 0.10 0.25; do
+            test -f "$DLS_DATA_ROOT/reports/d3a/eval-C-baseline-density$density.json"
+            test -f "$DLS_DATA_ROOT/reports/d3a/eval-C-rotate-density$density.json"
+          done
+          test ! -e "$DLS_DATA_ROOT/reports/d3a2/d3a2-summary.json"
+          mkdir -p "$TMPDIR" "$DLS_DATA_ROOT/reports/d3a2/logs"
+          sha256sum "$DLS_DATA_ROOT/checkpoints/d1-v1/C-seed42.pt" > "$DLS_DATA_ROOT/reports/d3a2/C-BC-before.sha256"
+
+      - name: Fetch original native controller and norm-matched own-input-only intervention
+        shell: bash
+        run: |
+          set -euo pipefail
+          for item in "src/dls_p0.py:dls_p0.py" \
+                      "scripts/d3a2_cross_to_self.py:d3a2.py"; do
+            SRC="${item%%:*}"
+            TARGET="${item#*:}"
+            RAW="https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/${GITHUB_SHA}/$SRC"
+            OK=0
+            for URL in "https://gh-proxy.com/$RAW" "https://ghproxy.net/$RAW" "$RAW"; do
+              if curl -fLsS --connect-timeout 10 --max-time 60 "$URL" -o "$TMPDIR/$TARGET"; then
+                OK=1
+                break
+              fi
+            done
+            test "$OK" = 1
+            "$DLS_ENV/bin/python" -m py_compile "$TMPDIR/$TARGET"
+            sha256sum "$TMPDIR/$TARGET"
+          done
+
+      - name: Run only new C cross-to-self condition at medium and high traffic density
+        shell: bash
+        run: |
+          set -euo pipefail
+          "$DLS_ENV/bin/python" "$TMPDIR/d3a2.py" --variant C --mode self --density 0.10 \
+            > "$DLS_DATA_ROOT/reports/d3a2/logs/C-self-0.10.log" 2>&1 &
+          P1=$!
+          "$DLS_ENV/bin/python" "$TMPDIR/d3a2.py" --variant C --mode self --density 0.25 \
+            > "$DLS_DATA_ROOT/reports/d3a2/logs/C-self-0.25.log" 2>&1 &
+          P2=$!
+          failed=0
+          if wait "$P1"; then
+            tail -1 "$DLS_DATA_ROOT/reports/d3a2/logs/C-self-0.10.log"
+          else
+            tail -80 "$DLS_DATA_ROOT/reports/d3a2/logs/C-self-0.10.log"
+            failed=1
+          fi
+          if wait "$P2"; then
+            tail -1 "$DLS_DATA_ROOT/reports/d3a2/logs/C-self-0.25.log"
+          else
+            tail -80 "$DLS_DATA_ROOT/reports/d3a2/logs/C-self-0.25.log"
+            failed=1
+          fi
+          test "$failed" = 0
+
+      - name: Audit per-scene cross-module-message necessity versus C original and shuffled control
+        shell: bash
+        run: |
+          set -euo pipefail
+          "$DLS_ENV/bin/python" - <<'PY'
+          import json
+          from pathlib import Path
+          root=Path("/mnt/datasets/lxb/dls/reports")
+          result={
+              "stage":"D3a2 C original cross messages vs norm-matched own-only substitute",
+              "source":"D1 BC C seed42, all weights frozen",
+              "new_episode_simulations":48,
+              "reused_old_C_baseline_and_rotate_episodes":96,
+              "test_scenes":list(range(31000,31024)),
+              "model_training_steps":0,
+              "interpretation":"Norm-matched own-only intervention removes immediate cross-module info but changes message direction distribution; observed harm is not standalone proof of motor coordination",
+              "by_density":{},
+          }
+          for density in (0.1,0.25):
+              base=json.loads((root/f"d3a/eval-C-baseline-density{density:.2f}.json").read_text())
+              rotate=json.loads((root/f"d3a/eval-C-rotate-density{density:.2f}.json").read_text())
+              own=json.loads((root/f"d3a2/eval-C-self-density{density:.2f}.json").read_text())
+              for r in (base,rotate,own):
+                  assert r["eval_seeds"]==list(range(31000,31024))
+                  assert [e["seed"] for e in r["episodes"]]==list(range(31000,31024))
+              assert own["max_original_step_parity_error"]<2e-6
+              assert own["max_message_L2_squared_energy_difference"]<1e-3
+              assert own["mean_message_recipient_change_abs_per_tick"]>0
+              pairs=[
+                  {
+                      "seed":a["seed"],
+                      "self_minus_baseline_reward":c["reward"]-a["reward"],
+                      "self_minus_baseline_completion":c["route_completion"]-a["route_completion"],
+                      "self_minus_baseline_success":int(c["success"])-int(a["success"]),
+                  } for a,c in zip(base["episodes"],own["episodes"])
+              ]
+              result["by_density"][str(density)]={
+                  "original_success":base["success"],
+                  "recipient_rotated_success":rotate["success"],
+                  "cross_removed_self_success":own["success"],
+                  "original_mean_reward":base["mean_raw_reward"],
+                  "recipient_rotated_mean_reward":rotate["mean_raw_reward"],
+                  "cross_removed_self_mean_reward":own["mean_raw_reward"],
+                  "self_minus_original_mean_reward":own["mean_raw_reward"]-base["mean_raw_reward"],
+                  "self_minus_original_success_delta":own["success"]-base["success"],
+                  "own_substitution_abs_message_difference":own["mean_message_recipient_change_abs_per_tick"],
+                  "max_energy_error":own["max_message_L2_squared_energy_difference"],
+                  "paired_changes":pairs,
+              }
+              r=result["by_density"][str(density)]
+              print("D3a2 density",density,"original→rotate→no-cross success",
+                    r["original_success"],"→",r["recipient_rotated_success"],"→",
+                    r["cross_removed_self_success"],"rewards",
+                    round(r["original_mean_reward"],2),
+                    round(r["recipient_rotated_mean_reward"],2),
+                    round(r["cross_removed_self_mean_reward"],2))
+          output=root/"d3a2/d3a2-summary.json"
+          assert not output.exists()
+          output.write_text(json.dumps(result,ensure_ascii=False,indent=2),encoding="utf-8")
+          print("D3a2 audited all per-episode scene IDs, no checkpoint modification")
+          PY
+          sha256sum "$DLS_DATA_ROOT/checkpoints/d1-v1/C-seed42.pt" > "$DLS_DATA_ROOT/reports/d3a2/C-BC-after.sha256"
+          cmp "$DLS_DATA_ROOT/reports/d3a2/C-BC-before.sha256" "$DLS_DATA_ROOT/reports/d3a2/C-BC-after.sha256"
+          {
+            echo "## D3a2 norm-matched cross-module message content deletion"
+            echo "- Reused 96 original/recipient-rotation episodes; only ran 48 new C-own-input episodes"
+            echo "- Matched each recipient message L2 norm while removing cross-module content"
+            echo "- Original D1 BC source unchanged"
+            echo "- Summary: \`$DLS_DATA_ROOT/reports/d3a2/d3a2-summary.json\`"
+          } >> "$GITHUB_STEP_SUMMARY"
