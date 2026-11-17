@@ -11,7 +11,7 @@ import numpy as np
 from metadrive.envs.metadrive_env import MetaDriveEnv
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from dls_dual_pedal_adapter import install_dual_pedal_adapter
+from dls_dual_pedal_adapter import configure_dual_pedal_action_space, install_dual_pedal_adapter
 
 
 DATA_ROOT = Path(os.environ["DLS_DATA_ROOT"]).resolve()
@@ -44,7 +44,10 @@ def run_one(seed):
     obs, reset_info = env.reset(seed=seed)
     obs = np.asarray(obs, dtype=np.float32)
     assert obs.ndim == 1 and np.isfinite(obs).all()
+    configure_dual_pedal_action_space(env)
     assert env.action_space.shape == (2,), env.action_space
+    assert np.allclose(env.action_space.low, [0.0, 0.0])
+    assert np.allclose(env.action_space.high, [1.0, 1.0])
 
     vehicle = env.agent
     install_dual_pedal_adapter(vehicle, steering_controller=lambda _: 0.0)
@@ -112,6 +115,8 @@ def run_one(seed):
         "traffic_density": 0.0,
         "observation_dim": int(obs.size),
         "action_space": str(env.action_space),
+        "action_space_low": np.asarray(env.action_space.low).tolist(),
+        "action_space_high": np.asarray(env.action_space.high).tolist(),
         "control_interface": "[absolute_throttle, absolute_brake], each in [0,1]",
         "steering_controller": "fixed_zero_on_straight_map",
         "max_engine_force": engine_max,
