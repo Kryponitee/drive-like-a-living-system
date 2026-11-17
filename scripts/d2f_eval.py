@@ -100,7 +100,7 @@ def main():
         "phase": args.phase,
         "train_seed": args.seed if actor is not None else None,
         "traffic_density": args.density,
-        "seeds": list(range(4300, 4312)),
+        "seeds": list(range(4400, 4424)),
         "horizon": 800,
         "success": sum(x["success"] for x in episodes),
         "collision": sum(x["collision"] for x in episodes),
