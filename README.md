@@ -1,6 +1,6 @@
 # Drive Like a Living System (DLS)
 
-**Current stage: P0 research protocol defined (2026-11-16); no implementation or experimental results.**
+**Current stage (2026-11-17): P0 protocol fixed; D0 headless simulator and expert-data pilot completed; D1 learning and coordination experiments not started.**
 
 ## Research question
 
@@ -17,7 +17,14 @@ We **do not** prescribe driving-skill labels to internal units or assume that a 
 - **Low level C:** learned recurrent modules, soft routing, common action head, physical-state feedback.
 - **Main comparison:** modular controller with *only shared physical feedback* versus the same controller *with learnable direct inter-module communication*. Include a matched monolithic recurrent-policy baseline.
 - **Evidence requirements:** closed-loop competence, repeatable role/reuse, and causal feedback compensation under controlled perturbations.
-- **Status:** protocol only; D0 simulator/data audit is the next step, not yet executed.
+- **Status:** MetaDrive 0.4.3 environment and headless smoke verified. Deterministic expert audit: 9/12 success with 800-step horizon versus 4/12 at 400-step cap; 3/12 collision in either setting. See the report below. This is an infrastructure/data audit, **not a learned coordination result**.
+
+## D0 execution evidence
+
+- [2026-11-17 — Environment and expert audit (real server logs and outcomes)](docs/research/2026-11-17-D0-environment-and-expert-audit.md)
+- Dataset and asset root: `/mnt/datasets/lxb/dls/` on a separate volume.
+- Python Conda environment: `/home/ps/miniconda3/envs/dls-p0/` on system disk.
+- Next research gate: scenario coverage / success-filtered teacher demonstrations before BC and model experiments.
 
 ## Previous records (retained for provenance)
 
