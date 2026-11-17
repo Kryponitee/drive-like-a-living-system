@@ -13,6 +13,8 @@ from metadrive.examples.ppo_expert.numpy_expert import expert
 data_root = Path(os.environ["DLS_DATA_ROOT"]).resolve()
 assert str(data_root).startswith("/mnt/datasets/lxb/dls")
 
+max_steps = int(os.environ.get("DLS_D0_MAX_STEPS", "400"))
+assert max_steps in (400, 800)
 report_dir = data_root / "reports" / "d0"
 data_dir = data_root / "demonstrations"
 report_dir.mkdir(parents=True, exist_ok=True)
@@ -26,7 +28,7 @@ env = MetaDriveEnv(
         "map": 3,
         "start_seed": 0,
         "num_scenarios": 32,
-        "horizon": 400,
+        "horizon": max_steps,
         "log_level": 50,
     }
 )
@@ -43,7 +45,7 @@ for seed in range(12):
     episode_reward = 0.0
     last_info = info
     final_done = False
-    for step_idx in range(400):
+    for step_idx in range(max_steps):
         obs_array = np.asarray(obs, dtype=np.float32)
         action = np.clip(np.asarray(expert(env.agent, deterministic=True), dtype=np.float32), -1, 1)
         assert action.shape == (2,), action.shape
@@ -80,7 +82,7 @@ for seed in range(12):
 
 env.close()
 
-npz_path = data_dir / "d0-expert-probe.npz"
+npz_path = data_dir / f"d0-expert-probe-h{max_steps}.npz"
 np.savez_compressed(
     npz_path,
     observations=np.stack(states),
@@ -92,6 +94,7 @@ np.savez_compressed(
 report = {
     "stage": "D0 expert data coverage probe, not a training result",
     "checked_at_utc": datetime.now(timezone.utc).isoformat(),
+    "max_steps": max_steps,
     "episodes": episode_results,
     "num_transitions": len(states),
     "observation_dim": len(states[0]),
@@ -101,6 +104,6 @@ report = {
     "data_path": str(npz_path),
     "data_bytes": npz_path.stat().st_size,
 }
-report_path = report_dir / "expert_audit.json"
+report_path = report_dir / f"expert_audit_h{max_steps}.json"
 report_path.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
 print(json.dumps(report, ensure_ascii=False, indent=2))
