@@ -1,0 +1,223 @@
+name: DLS D2n-A official BC-initialized 64-worker A B C scientific pilot
+
+on:
+  push:
+    paths:
+      - .github/workflows/d2n-a-official-BC-PPO.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: dls-d2n-a-controlled-training
+  cancel-in-progress: false
+
+jobs:
+  train_and_compare:
+    runs-on: [self-hosted, Linux, X64]
+    timeout-minutes: 150
+    env:
+      DLS_DATA_ROOT: /mnt/datasets/lxb/dls
+      SB3_VENV: /home/ps/miniconda3/envs/dls-sb3-compat
+      TMPDIR: /mnt/datasets/lxb/dls/tmp
+      XDG_CACHE_HOME: /mnt/datasets/lxb/dls/cache/xdg
+      PYTHONNOUSERSITE: "1"
+      OMP_NUM_THREADS: "1"
+      OPENBLAS_NUM_THREADS: "1"
+      MKL_NUM_THREADS: "1"
+      NUMEXPR_NUM_THREADS: "1"
+    steps:
+      - name: Verify final preparation gates and immutable BC actor sources
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(findmnt -n -o TARGET -T "$DLS_DATA_ROOT")" = "/mnt/datasets"
+          test "$(findmnt -n -o TARGET -T "$SB3_VENV")" = "/"
+          test -f "$DLS_DATA_ROOT/reports/d2l/full-ppo-worker-comparison.json"
+          test -f "$DLS_DATA_ROOT/reports/d2m/vector-state-summary.json"
+          test -f "$DLS_DATA_ROOT/reports/d2m-official-policy/official-policy-bridge-smoke.json"
+          for variant in A B C; do
+            test -f "$DLS_DATA_ROOT/checkpoints/d1-v1/$variant-seed42.pt"
+            test ! -e "$DLS_DATA_ROOT/checkpoints/d2n-a/official-PPO-$variant-seed42.zip"
+            test ! -e "$DLS_DATA_ROOT/reports/d2n-a/train-$variant-seed42.json"
+          done
+          "$SB3_VENV/bin/python" - <<'PY'
+          import json,psutil,torch,stable_baselines3,sb3_contrib
+          from pathlib import Path
+          assert torch.__version__.startswith("2.5.1")
+          assert stable_baselines3.__version__==sb3_contrib.__version__=="2.6.0"
+          assert psutil.virtual_memory().available > 70*1024**3
+          d=json.loads(Path("/mnt/datasets/lxb/dls/reports/d2m-official-policy/official-policy-bridge-smoke.json").read_text())
+          assert d["official_ppo_rollout_buffer_and_loss_used"]
+          assert d["max_old_policy_replay_ratio_error"]<2e-3
+          x=json.loads(Path("/mnt/datasets/lxb/dls/reports/d2l/full-ppo-worker-comparison.json").read_text())
+          assert x["preferred_worker_count"]==64
+          print("D2n scientific training approved: 64 workers, original D1 BC actor, official RecurrentPPO")
+          PY
+          test "$(df -Pk "$DLS_DATA_ROOT" | awk 'NR==2 {print $4}')" -gt 10485760
+          mkdir -p "$TMPDIR" "$DLS_DATA_ROOT/reports/d2n-a/train-logs" \
+                   "$DLS_DATA_ROOT/reports/d2n-a/eval-logs" \
+                   "$DLS_DATA_ROOT/checkpoints/d2n-a" "$DLS_DATA_ROOT/tensorboard/d2n-a"
+          sha256sum "$DLS_DATA_ROOT/checkpoints/d1-v1/"{A,B,C}"-seed42.pt" \
+            > "$DLS_DATA_ROOT/reports/d2n-a/frozen-BC-sources-before.txt"
+
+      - name: Reuse exact official 2.6 recurrent PPO plus DLS code without installing packages
+        shell: bash
+        run: |
+          set -euo pipefail
+          for item in "src/dls_p0.py:dls_p0.py" \
+                      "src/dls_recurrent_ppo.py:dls_recurrent_ppo.py" \
+                      "src/dls_vector_state_adapter.py:dls_vector_state_adapter.py" \
+                      "src/dls_sb3_recurrent_policy.py:dls_sb3_recurrent_policy.py" \
+                      "scripts/d2n_a_official_bc_ppo_train.py:d2n_train.py" \
+                      "scripts/d2n_a_official_bc_ppo_eval.py:d2n_eval.py"; do
+            SRC="${item%%:*}"
+            TARGET="${item#*:}"
+            RAW="https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/${GITHUB_SHA}/$SRC"
+            OK=0
+            for URL in "https://gh-proxy.com/$RAW" "https://ghproxy.net/$RAW" "$RAW"; do
+              if curl -fLsS --connect-timeout 10 --max-time 60 "$URL" -o "$TMPDIR/$TARGET"; then
+                OK=1
+                break
+              fi
+            done
+            test "$OK" -eq 1
+            "$SB3_VENV/bin/python" -m py_compile "$TMPDIR/$TARGET"
+            sha256sum "$TMPDIR/$TARGET"
+          done
+
+      - name: Official PPO optimize original A B C sequentially with 64 parallel MetaDrive workers each
+        shell: bash
+        run: |
+          set -euo pipefail
+          for variant in A B C; do
+            echo "START D2n scientific $variant: BC-initialized official PPO 65536 frames, 64 workers"
+            "$SB3_VENV/bin/python" "$TMPDIR/d2n_train.py" --variant "$variant" \
+              > "$DLS_DATA_ROOT/reports/d2n-a/train-logs/$variant.log" 2>&1 || {
+                echo "FAIL D2n train $variant"
+                tail -120 "$DLS_DATA_ROOT/reports/d2n-a/train-logs/$variant.log"
+                exit 1
+              }
+            echo "PASS D2n train $variant"
+            grep -E "ROLLOUT [0-9]+/8|PASS D2n-A train" \
+              "$DLS_DATA_ROOT/reports/d2n-a/train-logs/$variant.log" | tail -11
+            test -s "$DLS_DATA_ROOT/checkpoints/d2n-a/official-PPO-$variant-seed42.zip"
+            test -s "$DLS_DATA_ROOT/reports/d2n-a/train-$variant-seed42.json"
+          done
+
+      - name: Evaluate original BC versus official PPO on 24 untouched scenes and 3 densities
+        shell: bash
+        run: |
+          set -euo pipefail
+          declare -a PIDS=()
+          declare -a LABELS=()
+          for phase in bc ppo; do
+            for variant in A B C; do
+              for density in 0.00 0.10 0.25; do
+                label="$phase-$variant-density$density"
+                "$SB3_VENV/bin/python" "$TMPDIR/d2n_eval.py" \
+                  --phase "$phase" --variant "$variant" --density "$density" \
+                  > "$DLS_DATA_ROOT/reports/d2n-a/eval-logs/$label.log" 2>&1 &
+                PIDS+=("$!")
+                LABELS+=("$label")
+              done
+            done
+          done
+          test "${#PIDS[@]}" -eq 18
+          failed=0
+          for i in "${!PIDS[@]}"; do
+            label="${LABELS[$i]}"
+            if wait "${PIDS[$i]}"; then
+              echo "PASS eval $label"
+              grep '^EVAL ' "$DLS_DATA_ROOT/reports/d2n-a/eval-logs/$label.log" | tail -1
+            else
+              echo "FAIL eval $label"
+              tail -85 "$DLS_DATA_ROOT/reports/d2n-a/eval-logs/$label.log"
+              failed=1
+            fi
+          done
+          test "$failed" -eq 0
+
+      - name: Paired new-scene summary with full data and unchanged source checkpoints
+        shell: bash
+        run: |
+          set -euo pipefail
+          "$SB3_VENV/bin/python" - <<'PY'
+          from pathlib import Path
+          import json
+          root=Path("/mnt/datasets/lxb/dls/reports/d2n-a")
+          report={
+              "stage":"D2n-A official SB3-Contrib original A/B/C 65536-env-frame BC-initiated PPO scientific pilot",
+              "original_train_seed":42,
+              "train_algorithm_seed":811,
+              "train_frames_per_model":65536,
+              "workers_per_model":64,
+              "eval_seeds":list(range(30000,30024)),
+              "density_conditions":[0.0,0.1,0.25],
+              "one_train_initialization":True,
+              "causal_communication_not_yet_tested":True,
+              "models":{},
+          }
+          for variant in "ABC":
+              training=json.loads((root/f"train-{variant}-seed42.json").read_text())
+              assert training["train_frames"]==65536
+              assert training["num_workers"]==64 and training["n_rollouts"]==8
+              assert training["replayed_probability_ratio_max_error"]<2e-3
+              group={
+                  "training": {
+                      "completed_episodes": training["completed_train_episodes"],
+                      "successes": training["successful_train_episodes"],
+                      "actor_params": training["actor_params"],
+                      "critic_params": training["critic_params"],
+                      "max_replay_error": training["replayed_probability_ratio_max_error"],
+                      "final_pre_tanh_sigma": training["final_pre_tanh_sigma"],
+                      "training_seconds": training["train_seconds"],
+                  },
+                  "by_density": {},
+              }
+              for density in (0.0,0.1,0.25):
+                  paired=[]
+                  for phase in ("bc","ppo"):
+                      x=json.loads((root/f"eval-{phase}-{variant}-density{density:.2f}.json").read_text())
+                      assert x["eval_seeds"]==list(range(30000,30024))
+                      assert [e["seed"] for e in x["episodes"]]==list(range(30000,30024))
+                      paired.append(x)
+                  old,new=paired
+                  gains=sum(not x["success"] and y["success"] for x,y in zip(old["episodes"],new["episodes"]))
+                  losses=sum(x["success"] and not y["success"] for x,y in zip(old["episodes"],new["episodes"]))
+                  group["by_density"][str(density)]={
+                      "BC_success":old["success"],"PPO_success":new["success"],
+                      "BC_collisions":old["collision"],"PPO_collisions":new["collision"],
+                      "BC_offroad":old["offroad"],"PPO_offroad":new["offroad"],
+                      "BC_mean_reward":old["mean_raw_environment_reward"],
+                      "PPO_mean_reward":new["mean_raw_environment_reward"],
+                      "BC_mean_completion":old["mean_route_completion"],
+                      "PPO_mean_completion":new["mean_route_completion"],
+                      "PPO_only_successes":gains,"BC_only_successes":losses,
+                      "paired_net_successes":gains-losses,
+                  }
+              report["models"][variant]=group
+          assert report["models"]["B"]["training"]["actor_params"]==report["models"]["C"]["training"]["actor_params"]
+          assert report["models"]["B"]["training"]["critic_params"]==report["models"]["C"]["training"]["critic_params"]
+          path=root/"d2n-a-summary.json"
+          assert not path.exists()
+          path.write_text(json.dumps(report,ensure_ascii=False,indent=2),encoding="utf-8")
+          for variant,group in report["models"].items():
+              print(variant,"train successes",group["training"]["successes"])
+              for density,metric in group["by_density"].items():
+                  print(variant,density,"BC->PPO",metric["BC_success"],"->",metric["PPO_success"],
+                        "reward",round(metric["BC_mean_reward"],2),"->",round(metric["PPO_mean_reward"],2))
+          PY
+          sha256sum "$DLS_DATA_ROOT/checkpoints/d1-v1/"{A,B,C}"-seed42.pt" \
+            > "$DLS_DATA_ROOT/reports/d2n-a/frozen-BC-sources-after.txt"
+          cmp "$DLS_DATA_ROOT/reports/d2n-a/frozen-BC-sources-before.txt" \
+              "$DLS_DATA_ROOT/reports/d2n-a/frozen-BC-sources-after.txt"
+          {
+            echo "## D2n-A true A/B/C BC-initialized official PPO scientific pilot"
+            echo "- Original A/B/C GRUs and slow-clock preserved; 64 MetaDrive workers and 65536 frames per model"
+            echo "- Same 42 BC checkpoint, initial sigma .05, official recurrent rollout GAE and PPO"
+            echo "- Matched training parameters and 24 fresh paired scenes per density for before/after"
+            echo "- No BC weights overwritten; no new expert demonstration or package setup"
+            echo "- Summary: \`$DLS_DATA_ROOT/reports/d2n-a/d2n-a-summary.json\`"
+          } >> "$GITHUB_STEP_SUMMARY"
