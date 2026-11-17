@@ -1,6 +1,6 @@
 # Drive Like a Living System (DLS)
 
-**Current stage (2026-11-17): D0–D1 completed; D2a–D2i diagnosed PPO exploration, actor drift and critic limitations. Official SB3-Contrib RecurrentPPO completed 300,032 training frames (D2j), but only 2/24 new-scene successes, so it remains a training-system reference. CPU-only sampling tests D2k verified that 64 MetaDrive workers deliver 925.4 steps/s, 1.68× the 32-worker throughput under matched 24,576-frame conditions. Next gate: optimizer-inclusive throughput and BC-initialized A/B/C-compatible training, then causal module-communication tests; no coordination evidence claimed yet.**
+**Current stage (2026-11-17): The D0/D1 training-data and BC control stages are complete, and PPO infrastructure preparation is CLOSED. D2l verified full official PPO throughput with 64 CPU workers: 258.2 vs 224.0 frames/sec for 32 workers (+15.3%). D2m verified A/B/C per-environment slow clocks and exact BC recurrence under asynchronous vectorization; D2m+ connected the original controllers to official SB3-Contrib recurrent rollout/GAE/PPO and passed real MetaDrive updates. D2n-A has been launched: first BC-initialized 64-worker A/B/C scientific training and held-out paired comparison. No module communication causal evidence is claimed until D3 interventions.**
 
 ## Research question
 
@@ -55,6 +55,10 @@ We **do not** prescribe driving-skill labels to internal units or assume that a 
 - [D2k initial worker-scaling — SUCCESS](https://github.com/Kryponitee/drive-like-a-living-system/actions/runs/44028935956): benchmark 4/8/16/32 concurrent CPU MetaDrive simulators; [performance protocol](docs/research/2026-11-17-D2k-worker-scaling-plan.md).
 - [D2k extended 32/48/64 workers — SUCCESS](https://github.com/Kryponitee/drive-like-a-living-system/actions/runs/44029425146): matched 24,576 steps each; throughput 551.3/759.1/925.4 steps/s. **64 workers selected** for subsequent optimizer-inclusive tests; [full performance results and limitations](docs/research/2026-11-17-D2k-extended-worker-scaling-results.md).
 
+
+- [D2l full-PPO 32 vs 64 worker optimizer-inclusive test — SUCCESS](https://github.com/Kryponitee/drive-like-a-living-system/actions/runs/44030181386): equal 32,768 frames and 1,024 actual optimizer updates; full training FPS **224.0 / 258.2**. [Full report](docs/research/2026-11-17-D2l-full-PPO-worker-results.md).
+- [D2m async state/slow-clock validation — SUCCESS](https://github.com/Kryponitee/drive-like-a-living-system/actions/runs/44030866838) and [official custom recurrent policy PPO bridge — SUCCESS](https://github.com/Kryponitee/drive-like-a-living-system/actions/runs/44031524331): A/B/C deterministic BC parity, replay error 2.62e-5 with official sequence buffer, real MetaDrive PPO updates. [Technical result](docs/research/2026-11-17-D2m-official-native-policy-results.md).
+- [D2n-A first controlled A/B/C official PPO research training — launched](https://github.com/Kryponitee/drive-like-a-living-system/actions/runs/44032089904): 64 workers per model sequentially, 65,536 frames/model, same BC seed42, identical official PPO configuration, fresh 24-seed paired evaluation for each of 3 traffic densities. [Prespecified protocol](docs/research/2026-11-17-D2n-A-official-BC-PPO-protocol.md). Results not yet established.
 
 ## Previous records (retained for provenance)
 
