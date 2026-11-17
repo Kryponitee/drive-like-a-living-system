@@ -1,0 +1,28 @@
+name: DLS D0 asset mirror probe
+
+on:
+  push:
+    paths:
+      - .github/workflows/d0-asset-mirror-probe.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  mirror-probe:
+    runs-on: [self-hosted, Linux, X64]
+    timeout-minutes: 8
+    steps:
+      - name: Compare official and mirror response headers
+        shell: bash
+        run: |
+          set -euo pipefail
+          ASSET="https://github.com/metadriverse/metadrive/releases/download/MetaDrive-0.4.3/assets.zip"
+          echo "Expected official size: 134074203 bytes"
+          for url in "$ASSET" "https://gh-proxy.com/$ASSET" "https://ghproxy.net/$ASSET"; do
+            echo "=== $url ==="
+            curl -L -sS -I --connect-timeout 8 --max-time 20 \
+              -w '\nRESULT code=%{http_code} content_type=%{content_type} remote=%{remote_ip} final=%{url_effective}\n' \
+              "$url" 2>&1 | tail -25 || true
+          done
