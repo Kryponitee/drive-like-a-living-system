@@ -1,0 +1,59 @@
+name: DLS D2n existing A B timing read-only audit
+
+on:
+  push:
+    paths:
+      - .github/workflows/d2n-timing-audit.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  audit_existing_reports:
+    runs-on: [self-hosted, Linux, X64]
+    timeout-minutes: 5
+    steps:
+      - name: Read existing completed A B train JSON without simulation or training
+        shell: bash
+        run: |
+          set -euo pipefail
+          /home/ps/miniconda3/envs/dls-p0/bin/python - <<'PY'
+          import json
+          from pathlib import Path
+          root=Path("/mnt/datasets/lxb/dls/reports/d2n-a")
+          results={}
+          for v in "AB":
+              p=root/f"train-{v}-seed42.json"
+              assert p.is_file(), p
+              data=json.loads(p.read_text())
+              times=data["rollout_collection_seconds"]
+              assert data["train_frames"]==65536 and data["num_workers"]==64 and len(times)==8
+              collect=sum(times)
+              total=float(data["train_seconds"])
+              residual=total-collect
+              assert residual>=0
+              results[v]={
+                  "train_seconds":total,
+                  "rollout_collection_seconds_sum":collect,
+                  "other_seconds_including_PPO_optimizer":residual,
+                  "rollout_collection_seconds_each":times,
+                  "rollout_collection_fps":65536/collect,
+                  "overall_fps":65536/total,
+                  "completed_episodes":data["completed_train_episodes"],
+                  "successes":data["successful_train_episodes"],
+                  "setup_seconds":data["setup_seconds"],
+                  "actor_params":data["actor_params"],
+                  "critic_params":data["critic_params"],
+                  "ppo_batch":data["ppo_minibatch"],
+                  "ppo_epochs":data["ppo_epochs"],
+              }
+              print(v, json.dumps(results[v],indent=2),flush=True)
+          a,b=results["A"],results["B"]
+          for key in ("train_seconds","rollout_collection_seconds_sum","other_seconds_including_PPO_optimizer","rollout_collection_fps","actor_params"):
+              print("B_over_A",key,b[key]/a[key],flush=True)
+          out=root/"d2n-a-b-timing-audit.json"
+          assert not out.exists()
+          out.write_text(json.dumps({"stage":"Read-only A/B runtime accounting, no new environment frames or updates","models":results},indent=2))
+          print("Saved",out)
+          PY
