@@ -35,7 +35,8 @@ def run_one(seed):
             "image_observation": False,
             "map": "S",
             "traffic_density": 0.0,
-            "num_scenarios": 1,
+            "num_scenarios": len(SEEDS),
+            "start_seed": SEEDS[0],
             "horizon": 600,
             "log_level": 50,
         }
