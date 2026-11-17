@@ -90,6 +90,12 @@ def run_one(seed):
     assert np.isclose(vehicle.dls_engine_force, 0.6 * engine_max, rtol=1e-6)
     assert np.isclose(vehicle.dls_brake_force, 0.4 * brake_max, rtol=1e-6)
     assert vehicle.dls_engine_force > 0.0 and vehicle.dls_brake_force > 0.0
+    simultaneous = {
+        "throttle": vehicle.dls_throttle,
+        "brake": vehicle.dls_brake,
+        "engine_force": vehicle.dls_engine_force,
+        "brake_force": vehicle.dls_brake_force,
+    }
 
     # 改变油门而固定制动、改变制动而固定油门，分别只改变对应执行器。
     step(0.8, 0.2)
@@ -120,10 +126,7 @@ def run_one(seed):
         "speed_after_acceleration_mps": speed_after_accel,
         "speed_after_braking_mps": speed_after_brake,
         "speed_after_simultaneous_command_mps": speed_after_simultaneous,
-        "simultaneous_throttle": vehicle.dls_throttle,
-        "simultaneous_brake": vehicle.dls_brake,
-        "simultaneous_engine_force": vehicle.dls_engine_force,
-        "simultaneous_brake_force": vehicle.dls_brake_force,
+        "simultaneous": simultaneous,
         "throttle_independence_pair": [list(pair_a), list(pair_b)],
         "brake_independence_pair": [list(pair_b), list(pair_c)],
         "passed": True,
