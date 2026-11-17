@@ -1,6 +1,6 @@
 # Drive Like a Living System (DLS)
 
-**Current stage (2026-11-17): D0–D1 completed. D2a–D2i diagnosed high steering exploration, BC function drift and unreliable critic learning; an isolated official SB3-Contrib recurrent PPO system now runs correctly. The official random-initialized LSTM reached only 2/24 successes after 300,032 frames on new scenes (D2j), so this is a training-system control, not evidence of reliable driving or modular coordination. D2k is benchmarking CPU worker scaling 4/8/16/32 with frozen weights; formal A/B/C training and causal communication experiments remain ahead.**
+**Current stage (2026-11-17): D0–D1 completed; D2a–D2i diagnosed PPO exploration, actor drift and critic limitations. Official SB3-Contrib RecurrentPPO completed 300,032 training frames (D2j), but only 2/24 new-scene successes, so it remains a training-system reference. CPU-only sampling tests D2k verified that 64 MetaDrive workers deliver 925.4 steps/s, 1.68× the 32-worker throughput under matched 24,576-frame conditions. Next gate: optimizer-inclusive throughput and BC-initialized A/B/C-compatible training, then causal module-communication tests; no coordination evidence claimed yet.**
 
 ## Research question
 
@@ -52,7 +52,8 @@ We **do not** prescribe driving-skill labels to internal units or assume that a 
 - [D2i matched Critic history ON/OFF plan](docs/research/2026-11-17-D2i-critic-history-control-plan.md) and [confirmed null final result](docs/research/2026-11-17-D2i-history-critic-results.md): no training data recaptured; 3 model occupancies × exact same GRU parameters and fixed 50 epochs; 0/3 met 5% gain criterion. [Actions SUCCESS](https://github.com/Kryponitee/drive-like-a-living-system/actions/runs/44024937004).
 - [Official RecurrentPPO 16k smoke — SUCCESS](https://github.com/Kryponitee/drive-like-a-living-system/actions/runs/44024379218): four parallel MetaDrive workers + standardized RecurrentPPO pipeline; 0/12 arrivals after 16k frames, no convergence claim. [Technical result and dependency isolation](docs/research/2026-11-17-official-recurrentppo-smoke-results.md).
 - [D2j official RecurrentPPO 300k-frame continuation — SUCCESS](https://github.com/Kryponitee/drive-like-a-living-system/actions/runs/44025266123): reuses checkpoint and VecNormalize; 300,032 total frames, 4 CPU workers, 2/24 new-scene successes vs 0/24 at 16k. [D2j result and limitations](docs/research/2026-11-17-D2j-official-300k-results.md).
-- [D2k worker-scaling test](https://github.com/Kryponitee/drive-like-a-living-system/actions/runs/44028935956): benchmark 4/8/16/32 concurrent CPU MetaDrive simulators with the same frozen D2j model, 8,192 aggregate steps each; [pre-registered performance protocol](docs/research/2026-11-17-D2k-worker-scaling-plan.md). Running as of this update.
+- [D2k initial worker-scaling — SUCCESS](https://github.com/Kryponitee/drive-like-a-living-system/actions/runs/44028935956): benchmark 4/8/16/32 concurrent CPU MetaDrive simulators; [performance protocol](docs/research/2026-11-17-D2k-worker-scaling-plan.md).
+- [D2k extended 32/48/64 workers — SUCCESS](https://github.com/Kryponitee/drive-like-a-living-system/actions/runs/44029425146): matched 24,576 steps each; throughput 551.3/759.1/925.4 steps/s. **64 workers selected** for subsequent optimizer-inclusive tests; [full performance results and limitations](docs/research/2026-11-17-D2k-extended-worker-scaling-results.md).
 
 
 ## Previous records (retained for provenance)
