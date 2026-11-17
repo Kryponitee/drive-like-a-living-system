@@ -1,6 +1,6 @@
 # Drive Like a Living System (DLS)
 
-**Current stage (2026-11-17): D0–D1 completed; D2b–D2g diagnosed PPO: high exploration noise harms successful sampling; BC anchoring reduces policy drift, but closed-loop gains are inconsistent; frozen critics explain only about 0.8%–1.9% of realized return variance. Next: value-only critic learning diagnostic (D2h), then modular communication intervention (D3a). No causal coordination evidence yet.**
+**Current stage (2026-11-17): D0–D1 completed; D2b–D2g diagnosed PPO: high exploration noise harms successful sampling; BC anchoring reduces policy drift, but closed-loop gains are inconsistent; frozen critics explain only about 0.8%–1.9% of realized return variance. Next: official-framework compatibility and value-only critic learning diagnostic (D2h), then benchmarked A/B/C recurrent PPO infrastructure prior to D3 causal interventions. No causal coordination evidence yet.**
 
 ## Research question
 
@@ -47,6 +47,9 @@ We **do not** prescribe driving-skill labels to internal units or assume that a 
 - Next: D2h value-only supervised return learning gate; avoid spending more PPO environment budget or claiming motor synergy until learning can be validated.
 - [D2 protocol and correctness record](docs/research/2026-11-17-D2a-D2b-recurrent-PPO.md).
 - Future: replicated closed-loop optimization and frozen-weight direct-message causal perturbations (D3).
+
+- [Official MetaDrive/SB3-Contrib/TorchRL comparison and D2h pre-registration](docs/research/2026-11-17-official-RL-stack-audit.md): standard RL infrastructure should be reused; SB3's LSTM baseline is not a drop-in replacement for custom A/B/C recurrent modules.
+- [D2h value-only critic diagnostic](https://github.com/Kryponitee/drive-like-a-living-system/actions/runs/44023029712): frozen BC actors, disjoint train/validation scene sets, read-only official stack package probe. Running at this update; no trained result assumed.
 
 ## Previous records (retained for provenance)
 
