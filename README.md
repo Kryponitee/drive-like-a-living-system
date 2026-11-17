@@ -1,6 +1,6 @@
 # Drive Like a Living System (DLS)
 
-**Current stage (2026-11-17): D0+D1 done; D2a PPO mechanics passed; D2b PPO lost BC driving performance; D2c confirmed excessive Gaussian steering exploration as the primary obstacle; D2d low-noise PPO correction under test. No causal motor coordination evidence yet.**
+**Current stage (2026-11-17): D0–D1 done; D2a PPO mechanics passed; D2b–D2c isolated excessive steering exploration; D2d low-noise PPO recovers some training successes but does not outperform BC; D2e found reduced closed-loop reward and degraded expert imitation after PPO. Next: single-factor BC-anchored PPO (D2f). No causal module coordination evidence yet.**
 
 ## Research question
 
@@ -37,7 +37,9 @@ We **do not** prescribe driving-skill labels to internal units or assume that a 
 - D2a: [recurrent PPO correctness audit — SUCCESS](https://github.com/Kryponitee/drive-like-a-living-system/actions/runs/44011443700), old-policy replay probability ratio=1 with proper tanh density, recurrent state replays and finite gradients.
 - D2b: [equal-step 4,096-transition PPO pilot — completed](https://github.com/Kryponitee/drive-like-a-living-system/actions/runs/44011875754): train-time success episodes A/B/C = 0/0/3; final closed-loop performance broadly degraded.
 - D2c: [frozen BC noise intervention — completed](https://github.com/Kryponitee/drive-like-a-living-system/actions/runs/44012974852): at density 0.10 success A/B/C collapsed from 16/18/18 of 24 when deterministic to 1/1/1 at pre-tanh exploration sigma=0.27.
-- D2d: [one-factor sigma=0.05 PPO correction](https://github.com/Kryponitee/drive-like-a-living-system/actions/runs/44013255699) launched; initial BC and prior PPO will be re-evaluated on identical fresh scenarios.
+- D2d: [one-factor sigma=0.05 PPO correction — SUCCESS](https://github.com/Kryponitee/drive-like-a-living-system/actions/runs/44013255699); training successes A/B/C changed from 0/0/3 to 3/4/3, but final driving did not improve beyond BC.
+- D2e: [read-only reward/imitation audit — SUCCESS](https://github.com/Kryponitee/drive-like-a-living-system/actions/runs/44014040894); at traffic density 0.10 PPO reduced both episodic reward and success while increasing BC validation imitation error.
+- Next hypothesis: add one BC functional anchoring term during low-noise recurrent PPO to test whether pretrained motor skill can be preserved while acquiring closed-loop improvements; this has NOT yet been tested.
 - [D2 protocol and correctness record](docs/research/2026-11-17-D2a-D2b-recurrent-PPO.md).
 - Future: replicated closed-loop optimization and frozen-weight direct-message causal perturbations (D3).
 
