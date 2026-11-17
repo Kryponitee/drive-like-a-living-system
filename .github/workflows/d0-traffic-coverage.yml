@@ -1,0 +1,53 @@
+name: DLS D0c traffic-density expert coverage
+
+on:
+  push:
+    paths:
+      - .github/workflows/d0-traffic-coverage.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: dls-d0c-traffic-coverage
+  cancel-in-progress: false
+
+jobs:
+  audit:
+    runs-on: [self-hosted, Linux, X64]
+    timeout-minutes: 25
+    env:
+      DLS_DATA_ROOT: /mnt/datasets/lxb/dls
+      DLS_ENV: /home/ps/miniconda3/envs/dls-p0
+      TMPDIR: /mnt/datasets/lxb/dls/tmp
+      XDG_CACHE_HOME: /mnt/datasets/lxb/dls/cache/xdg
+      PYTHONNOUSERSITE: "1"
+    steps:
+      - name: Verify data mount and previously audited environment
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(findmnt -n -o TARGET -T "$DLS_DATA_ROOT")" = "/mnt/datasets"
+          test -x "$DLS_ENV/bin/python"
+          test -f "$DLS_DATA_ROOT/metadrive_assets/version.txt"
+          test -f "$DLS_DATA_ROOT/reports/d0/expert_audit_h800.json"
+          mkdir -p "$TMPDIR" "$DLS_DATA_ROOT/reports/d0" "$DLS_DATA_ROOT/demonstrations/d0c_success_only"
+          df -h "$DLS_DATA_ROOT"
+
+      - name: Run paired 12-seed expert coverage audit at traffic densities 0, 0.1 and 0.25
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl -fsSL --connect-timeout 10 --max-time 90 \
+            "https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/${GITHUB_SHA}/scripts/d0_traffic_coverage.py" \
+            -o "$TMPDIR/d0_traffic_coverage.py"
+          "$DLS_ENV/bin/python" "$TMPDIR/d0_traffic_coverage.py"
+          test -f "$DLS_DATA_ROOT/reports/d0/expert_traffic_coverage.json"
+          {
+            echo "## D0c traffic-density coverage"
+            echo "- Compare paired seeds 0..11 across three density settings"
+            echo "- Preserve *only success* trajectories in \`$DLS_DATA_ROOT/demonstrations/d0c_success_only\`"
+            echo "- Report: \`$DLS_DATA_ROOT/reports/d0/expert_traffic_coverage.json\`"
+            echo "- This is a data quality audit, not learned motor synergy evidence."
+          } >> "$GITHUB_STEP_SUMMARY"
