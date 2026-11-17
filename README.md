@@ -1,6 +1,6 @@
 # Drive Like a Living System (DLS)
 
-**Current stage (2026-11-17): D0 finished, D1 BC + three-initialization repeats + new-scene confirmation completed. Next: D2 recurrent closed-loop optimization correctness. No causal motor coordination evidence yet.**
+**Current stage (2026-11-17): D0+D1 completed; D2a recurrent PPO math correctness passed; D2b small equal-step closed-loop PPO pilot running. No evidence yet for causal inter-module motor coordination.**
 
 ## Research question
 
@@ -34,7 +34,10 @@ We **do not** prescribe driving-skill labels to internal units or assume that a 
 - [Three-initialization repeat (42/43/44) — SUCCESS](https://github.com/Kryponitee/drive-like-a-living-system/actions/runs/44009829895)
 - [Fresh held-out seeds 3100–3123 — SUCCESS](https://github.com/Kryponitee/drive-like-a-living-system/actions/runs/44010604782)
 - [Fresh-scene test interpretation and detailed outcomes](docs/research/2026-11-17-D1f-fresh-scene-results.md): at density=0.10 C outperformed B for all three trained seeds, but aggregate advantage did not hold consistently over densities; no causal coordination conclusion.
-- Next gate: correctly implemented recurrent PPO on the same A/B/C architectures, equal environment budgets, then direct-message causal interventions.
+- D2a: [recurrent PPO correctness audit — SUCCESS](https://github.com/Kryponitee/drive-like-a-living-system/actions/runs/44011443700), old-policy replay probability ratio=1 with proper tanh density, recurrent state replays and finite gradients.
+- D2b: [small 4,096-step-per-model PPO trial](https://github.com/Kryponitee/drive-like-a-living-system/actions/runs/44011875754) launched, results must be checked before any learning claim.
+- [D2 protocol and correctness record](docs/research/2026-11-17-D2a-D2b-recurrent-PPO.md).
+- Future: replicated closed-loop optimization and frozen-weight direct-message causal perturbations (D3).
 
 ## Previous records (retained for provenance)
 
