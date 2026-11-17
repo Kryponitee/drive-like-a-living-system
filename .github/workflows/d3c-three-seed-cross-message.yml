@@ -1,0 +1,181 @@
+name: DLS D3c replicate cross-module message necessity for 3 frozen BC training seeds
+
+on:
+  push:
+    paths:
+      - .github/workflows/d3c-three-seed-cross-message.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: dls-d3c-three-frozen-BC-seeds
+  cancel-in-progress: false
+
+jobs:
+  replication:
+    runs-on: [self-hosted, Linux, X64]
+    timeout-minutes: 40
+    env:
+      DLS_DATA_ROOT: /mnt/datasets/lxb/dls
+      DLS_ENV: /home/ps/miniconda3/envs/dls-p0
+      TMPDIR: /mnt/datasets/lxb/dls/tmp
+      PYTHONNOUSERSITE: "1"
+      OMP_NUM_THREADS: "1"
+      OPENBLAS_NUM_THREADS: "1"
+      MKL_NUM_THREADS: "1"
+      NUMEXPR_NUM_THREADS: "1"
+    steps:
+      - name: Validate three distinct frozen D1 C models, prior D3a and D3a2, untouched results
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(findmnt -n -o TARGET -T "$DLS_DATA_ROOT")" = "/mnt/datasets"
+          test -f "$DLS_DATA_ROOT/reports/d3a/d3a-summary.json"
+          test -f "$DLS_DATA_ROOT/reports/d3a2/d3a2-summary.json"
+          for seed in 42 43 44; do
+            test -f "$DLS_DATA_ROOT/checkpoints/d1-v1/C-seed$seed.pt"
+          done
+          test "$(df -Pk "$DLS_DATA_ROOT" | awk 'NR==2 {print $4}')" -gt 10485760
+          test ! -e "$DLS_DATA_ROOT/reports/d3c/d3c-summary.json"
+          mkdir -p "$TMPDIR" "$DLS_DATA_ROOT/reports/d3c/logs"
+          sha256sum "$DLS_DATA_ROOT/checkpoints/d1-v1/"C-seed{42,43,44}.pt \
+             > "$DLS_DATA_ROOT/reports/d3c/BC-C-sha256-before.txt"
+          "$DLS_ENV/bin/python" - <<'PY'
+          import hashlib
+          from pathlib import Path
+          root=Path("/mnt/datasets/lxb/dls/checkpoints/d1-v1")
+          hashes=[hashlib.sha256((root/f"C-seed{i}.pt").read_bytes()).hexdigest() for i in (42,43,44)]
+          assert len(set(hashes))==3, "Need three genuinely independent trained BC actors"
+          print("D3c source C seed42/43/44 frozen checkpoint hashes are all distinct")
+          PY
+
+      - name: Download only existing original model and new bounded cross-seed evaluator
+        shell: bash
+        run: |
+          set -euo pipefail
+          for item in "src/dls_p0.py:dls_p0.py" \
+                      "scripts/d3c_three_seed_cross_content.py:d3c.py"; do
+            SRC="${item%%:*}"
+            TARGET="${item#*:}"
+            RAW="https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/${GITHUB_SHA}/$SRC"
+            OK=0
+            for URL in "https://gh-proxy.com/$RAW" "https://ghproxy.net/$RAW" "$RAW"; do
+              if curl -fLsS --connect-timeout 10 --max-time 60 "$URL" -o "$TMPDIR/$TARGET"; then
+                OK=1
+                break
+              fi
+            done
+            test "$OK" = 1
+            "$DLS_ENV/bin/python" -m py_compile "$TMPDIR/$TARGET"
+            sha256sum "$TMPDIR/$TARGET"
+          done
+
+      - name: Six parallel frozen C evaluations, 3 trained seeds x original or self-only, fresh scene seeds
+        shell: bash
+        run: |
+          set -euo pipefail
+          declare -a PIDS=()
+          declare -a NAMES=()
+          for model_seed in 42 43 44; do
+            for mode in baseline self; do
+              name="C-seed$model_seed-$mode"
+              "$DLS_ENV/bin/python" "$TMPDIR/d3c.py" \
+                --variant C --model-seed "$model_seed" \
+                --mode "$mode" --density 0.10 \
+                > "$DLS_DATA_ROOT/reports/d3c/logs/$name.log" 2>&1 &
+              PIDS+=("$!")
+              NAMES+=("$name")
+            done
+          done
+          test "${#PIDS[@]}" -eq 6
+          failed=0
+          for i in "${!PIDS[@]}"; do
+            if wait "${PIDS[$i]}"; then
+              echo "PASS ${NAMES[$i]}"
+              tail -1 "$DLS_DATA_ROOT/reports/d3c/logs/${NAMES[$i]}.log"
+            else
+              echo "FAIL ${NAMES[$i]}"
+              tail -100 "$DLS_DATA_ROOT/reports/d3c/logs/${NAMES[$i]}.log"
+              failed=1
+            fi
+          done
+          test "$failed" = 0
+
+      - name: Apply preregistered per-seed dependence criterion with per-episode provenance
+        shell: bash
+        run: |
+          set -euo pipefail
+          "$DLS_ENV/bin/python" - <<'PY'
+          import json
+          from pathlib import Path
+          root=Path("/mnt/datasets/lxb/dls/reports/d3c")
+          table={}
+          for seed in (42,43,44):
+              control=json.loads((root/f"eval-C-seed{seed}-baseline-density0.10.json").read_text())
+              self_only=json.loads((root/f"eval-C-seed{seed}-self-density0.10.json").read_text())
+              for r in (control,self_only):
+                  assert r["bc_seed"]==seed
+                  assert r["eval_seeds"]==list(range(32000,32024))
+                  assert [x["seed"] for x in r["episodes"]]==list(range(32000,32024))
+                  assert r["model_training_updates"]==0
+                  assert r["max_original_step_parity_error"]<2e-6
+                  assert r["max_message_L2_squared_energy_difference"]<1e-3
+              assert self_only["mean_message_recipient_change_abs_per_tick"]>0
+              assert control["source_checkpoint_sha256"]==self_only["source_checkpoint_sha256"]
+              rewards=[a["reward"]-b["reward"] for a,b in zip(self_only["episodes"],control["episodes"])]
+              success_change=self_only["success"]-control["success"]
+              reward_change=self_only["mean_raw_reward"]-control["mean_raw_reward"]
+              table[str(seed)]={
+                  "baseline_success":control["success"],
+                  "cross_removed_success":self_only["success"],
+                  "success_change":success_change,
+                  "baseline_mean_reward":control["mean_raw_reward"],
+                  "cross_removed_mean_reward":self_only["mean_raw_reward"],
+                  "mean_reward_change":reward_change,
+                  "baseline_mean_completion":control["mean_route_completion"],
+                  "cross_removed_mean_completion":self_only["mean_route_completion"],
+                  "mean_message_abs_change":self_only["mean_message_recipient_change_abs_per_tick"],
+                  "paired_rewards":rewards,
+                  "meets_joint_dependence_threshold":success_change<=-2 and reward_change<=-15,
+                  "large_opposite_reward_gain":reward_change>15,
+              }
+              print("D3c BC trained seed",seed,"baseline→no cross success",
+                    control["success"],"→",self_only["success"],
+                    "reward delta",round(reward_change,2),
+                    "joint threshold",table[str(seed)]["meets_joint_dependence_threshold"])
+          count=sum(x["meets_joint_dependence_threshold"] for x in table.values())
+          opposite=sum(x["large_opposite_reward_gain"] for x in table.values())
+          supports=count>=2 and opposite==0
+          summary={
+              "stage":"D3c three-train-seed frozen C BC direct cross-module content necessity replication",
+              "source_D1_BC_training_seeds":[42,43,44],
+              "fresh_scene_seeds":list(range(32000,32024)),
+              "traffic_density":0.10,
+              "total_new_episodes":144,
+              "new_training_steps":0,
+              "criterion":"At least 2/3 seeds show >=2 lost successes and >=15 mean reward decline, with no third seed showing >15 reward gain",
+              "seeds_meeting_joint_dependence_criterion":count,
+              "seeds_with_strong_opposite_reward_gain":opposite,
+              "supports_strong_cross_message_necessity_candidate":supports,
+              "models":table,
+              "caveat":"A within-C policy sensitivity test, not causal compensation or a clean architecture advantage; model seeds are independent trained models but all reuse the same 24 evaluation road seeds.",
+          }
+          output=root/"d3c-summary.json"
+          assert not output.exists()
+          output.write_text(json.dumps(summary,ensure_ascii=False,indent=2),encoding="utf-8")
+          print("D3c hypothesis gate:",supports,"seed-level support",count,"strong opposite seeds",opposite)
+          PY
+          sha256sum "$DLS_DATA_ROOT/checkpoints/d1-v1/"C-seed{42,43,44}.pt \
+            > "$DLS_DATA_ROOT/reports/d3c/BC-C-sha256-after.txt"
+          cmp "$DLS_DATA_ROOT/reports/d3c/BC-C-sha256-before.txt" \
+              "$DLS_DATA_ROOT/reports/d3c/BC-C-sha256-after.txt"
+          {
+            echo "## D3c three-seed C BC cross-message necessity"
+            echo "- Original BC C training seeds42/43/44, no retraining; 144 new episodes, primary density0.10"
+            echo "- Same model parameters, message L2 per-recipient preserved; own-only replacement vs original"
+            echo "- Source checkpoint hashes unchanged and independent scene32000..32023 provenance verified"
+            echo "- Predeclared evidence criterion applied per trained model seed, without treating reused road seeds as iid"
+            echo "- Summary: \`$DLS_DATA_ROOT/reports/d3c/d3c-summary.json\`"
+          } >> "$GITHUB_STEP_SUMMARY"
