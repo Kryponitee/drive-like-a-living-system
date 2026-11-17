@@ -65,7 +65,7 @@ jobs:
             test ! -e "$ASSET_DIR"
             test ! -e "$UNPACK"
             if test ! -f "$ASSET_ZIP"; then
-              curl -fL --retry 4 --retry-all-errors --retry-delay 3 --connect-timeout 15 --max-time 900 \
+              curl -fL --retry 4 --retry-delay 3 --connect-timeout 15 --max-time 900 \
                 "https://github.com/metadriverse/metadrive/releases/download/MetaDrive-0.4.3/assets.zip" -o "$ASSET_ZIP.part"
               mv "$ASSET_ZIP.part" "$ASSET_ZIP"
             fi
@@ -100,7 +100,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          curl -fL --retry 4 --retry-all-errors --connect-timeout 15 --max-time 120 \
+          curl -fL --retry 4 --connect-timeout 15 --max-time 120 \
             "https://raw.githubusercontent.com/Kryponitee/drive-like-a-living-system/main/scripts/d0_smoke.py" \
             -o "$TMPDIR/d0_smoke.py"
           "$DLS_ENV/bin/python" "$TMPDIR/d0_smoke.py"
