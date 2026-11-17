@@ -1,6 +1,6 @@
 # Drive Like a Living System (DLS)
 
-**Current stage (2026-11-17): D0 completed; D1 expert collection verified (91,717 train + 9,822 validation transitions); three-model BC pilot running. Coordination mechanism evidence not yet available.**
+**Current stage (2026-11-17): D0 finished, D1 BC + three-initialization repeats + new-scene confirmation completed. Next: D2 recurrent closed-loop optimization correctness. No causal motor coordination evidence yet.**
 
 ## Research question
 
@@ -24,13 +24,17 @@ We **do not** prescribe driving-skill labels to internal units or assume that a 
 - [2026-11-17 — Environment and expert audit (real server logs and outcomes)](docs/research/2026-11-17-D0-environment-and-expert-audit.md)
 - Dataset and asset root: `/mnt/datasets/lxb/dls/` on a separate volume.
 - Python Conda environment: `/home/ps/miniconda3/envs/dls-p0/` on system disk.
-- D0 traffic/interaction audits completed; proceed with the bounded D1 pilot (do not assume module coordination is established).
+- D0 traffic/interaction audits completed; training and evaluation outputs stored exclusively on the data disk.
 
 ## D1 execution evidence
 
 - [D1 shared expert dataset and A/B/C BC pilot design](docs/research/2026-11-17-D1-data-and-BC-pilot.md)
 - [Completed 27-worker dataset collection](https://github.com/Kryponitee/drive-like-a-living-system/actions/runs/44008816875)
-- [A/B/C BC + closed-loop evaluation workflow](https://github.com/Kryponitee/drive-like-a-living-system/actions/runs/44009291227) (running as of latest update; no results assumed)
+- [A/B/C BC + closed-loop evaluation workflow — SUCCESS](https://github.com/Kryponitee/drive-like-a-living-system/actions/runs/44009291227)
+- [Three-initialization repeat (42/43/44) — SUCCESS](https://github.com/Kryponitee/drive-like-a-living-system/actions/runs/44009829895)
+- [Fresh held-out seeds 3100–3123 — SUCCESS](https://github.com/Kryponitee/drive-like-a-living-system/actions/runs/44010604782)
+- [Fresh-scene test interpretation and detailed outcomes](docs/research/2026-11-17-D1f-fresh-scene-results.md): at density=0.10 C outperformed B for all three trained seeds, but aggregate advantage did not hold consistently over densities; no causal coordination conclusion.
+- Next gate: correctly implemented recurrent PPO on the same A/B/C architectures, equal environment budgets, then direct-message causal interventions.
 
 ## Previous records (retained for provenance)
 
