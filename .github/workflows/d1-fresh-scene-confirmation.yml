@@ -1,0 +1,179 @@
+name: DLS D1f frozen-model independent-scene confirmation
+
+on:
+  push:
+    paths:
+      - .github/workflows/d1-fresh-scene-confirmation.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: dls-d1f-fresh-eval
+  cancel-in-progress: false
+
+jobs:
+  evaluate:
+    runs-on: [self-hosted, Linux, X64]
+    timeout-minutes: 45
+    env:
+      DLS_DATA_ROOT: /mnt/datasets/lxb/dls
+      DLS_ENV: /home/ps/miniconda3/envs/dls-p0
+      TMPDIR: /mnt/datasets/lxb/dls/tmp
+      PYTHONNOUSERSITE: "1"
+      XDG_CACHE_HOME: /mnt/datasets/lxb/dls/cache/xdg
+      OMP_NUM_THREADS: "1"
+      OPENBLAS_NUM_THREADS: "1"
+      MKL_NUM_THREADS: "1"
+      NUMEXPR_NUM_THREADS: "1"
+    steps:
+      - name: Ensure no training and all nine frozen checkpoints exist
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(findmnt -n -o TARGET -T "$DLS_DATA_ROOT")" = "/mnt/datasets"
+          test -f "$DLS_DATA_ROOT/reports/d1/d1-seed-replication-summary.json"
+          test -f "$DLS_DATA_ROOT/metadrive_assets/version.txt"
+          for seed in 42 43 44; do
+            for variant in A B C; do
+              test -f "$DLS_DATA_ROOT/checkpoints/d1-v1/$variant-seed$seed.pt"
+            done
+          done
+          test "$(nproc)" -ge 32
+          mkdir -p "$TMPDIR" "$DLS_DATA_ROOT/reports/d1/confirm24-logs"
+          df -h "$DLS_DATA_ROOT"
+
+      - name: Retrieve exact evaluation code, reusing original A/B/C source
+        shell: bash
+        run: |
+          set -euo pipefail
+          for item in "src/dls_p0.py:dls_p0.py" "scripts/d1_eval.py:d1_eval.py"; do
+            SRC="${item%%:*}"
+            NAME="${item#*:}"
+            RAW="https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/${GITHUB_SHA}/$SRC"
+            DONE=0
+            for URL in "https://gh-proxy.com/$RAW" "https://ghproxy.net/$RAW" "$RAW"; do
+              if curl -fLsS --connect-timeout 10 --max-time 60 "$URL" -o "$TMPDIR/$NAME"; then
+                DONE=1
+                break
+              fi
+            done
+            test "$DONE" -eq 1
+            "$DLS_ENV/bin/python" -m py_compile "$TMPDIR/$NAME"
+            sha256sum "$TMPDIR/$NAME"
+          done
+
+      - name: Evaluate 9 frozen models plus expert via 30 CPU workers on NEW seeds 3100-3123
+        shell: bash
+        run: |
+          set -euo pipefail
+          declare -a PIDS=()
+          declare -a NAMES=()
+          for variant in A B C expert; do
+            if test "$variant" = expert; then
+              SEEDS=(42)
+            else
+              SEEDS=(42 43 44)
+            fi
+            for seed in "${SEEDS[@]}"; do
+              for density in 0.00 0.10 0.25; do
+                name="$variant-seed$seed-density$density"
+                "$DLS_ENV/bin/python" "$TMPDIR/d1_eval.py" \
+                  --variant "$variant" --seed "$seed" --start-seed 3100 \
+                  --scene-count 24 --density "$density" --tag confirm24 \
+                  > "$DLS_DATA_ROOT/reports/d1/confirm24-logs/$name.log" 2>&1 &
+                PIDS+=("$!")
+                NAMES+=("$name")
+              done
+            done
+          done
+          test "${#PIDS[@]}" = 30
+          failed=0
+          for index in "${!PIDS[@]}"; do
+            if wait "${PIDS[$index]}"; then
+              echo "PASS ${NAMES[$index]}"
+              grep -E "traffic=.*success=" "$DLS_DATA_ROOT/reports/d1/confirm24-logs/${NAMES[$index]}.log" | tail -1
+            else
+              echo "FAIL ${NAMES[$index]}"
+              tail -55 "$DLS_DATA_ROOT/reports/d1/confirm24-logs/${NAMES[$index]}.log"
+              failed=1
+            fi
+          done
+          test "$failed" -eq 0
+
+      - name: Pair scenarios and model initializations, report falsification criteria
+        shell: bash
+        run: |
+          set -euo pipefail
+          "$DLS_ENV/bin/python" - <<'PY'
+          import json
+          from pathlib import Path
+          root=Path("/mnt/datasets/lxb/dls/reports/d1")
+          seeds=(42,43,44)
+          densities=(0.0,0.1,0.25)
+          def load(variant, seed, density):
+              name=f"closed-loop-confirm24-{variant}-seed{seed}-density{density:.2f}.json"
+              report=json.loads((root/name).read_text())
+              assert report["evaluation_tag"]=="confirm24"
+              assert report["evaluated_seeds"]==list(range(3100,3124))
+              assert report["densities"]==[density]
+              rows=report["results"]
+              assert len(rows)==1 and len(rows[0]["episodes"])==24
+              return rows[0]
+          result={
+              "stage":"D1f frozen model confirmation: NEW independent scene seed interval 3100-3123",
+              "train_seeds":[42,43,44],
+              "new_scenario_seeds":list(range(3100,3124)),
+              "densities":list(densities),
+              "data_or_weights_modified":False,
+              "note":"Multiple trained policies see the SAME 24 new scene seeds per density. Reuse not independent n=72 for uncertainty.",
+              "by_density":{},
+          }
+          aggregate={variant:{"success":0,"collision":0,"out_of_road":0,"timeout":0} for variant in "ABC"}
+          for density in densities:
+              group={}
+              for variant in "ABC":
+                  rows=[]
+                  for seed in seeds:
+                      p=load(variant,seed,density)
+                      rows.append({"seed":seed,"success":p["success"],"collisions":p["collisions"],
+                                   "out_of_road":p["out_of_road"],"timeout":p["timeout"],
+                                   "mean_route_completion":p["mean_route_completion"]})
+                      aggregate[variant]["success"]+=p["success"]
+                      aggregate[variant]["collision"]+=p["collisions"]
+                      aggregate[variant]["out_of_road"]+=p["out_of_road"]
+                      aggregate[variant]["timeout"]+=p["timeout"]
+                  group[variant]=rows
+              teacher=load("expert",42,density)
+              group["expert"]={"success":teacher["success"],"collisions":teacher["collisions"],
+                               "out_of_road":teacher["out_of_road"],"timeout":teacher["timeout"]}
+              paired=[]
+              for seed in seeds:
+                  b=load("B",seed,density)["episodes"]
+                  c=load("C",seed,density)["episodes"]
+                  assert [e["seed"] for e in b] == [e["seed"] for e in c]
+                  wins=sum(not b[i]["arrive_dest"] and c[i]["arrive_dest"] for i in range(24))
+                  losses=sum(b[i]["arrive_dest"] and not c[i]["arrive_dest"] for i in range(24))
+                  paired.append({"model_seed":seed,"C_only_success":wins,"B_only_success":losses,
+                                 "net_C_minus_B":wins-losses})
+              group["paired_C_vs_B"]=paired
+              result["by_density"][str(density)]=group
+          result["aggregate_across_reused_scenes_and_train_seeds"]=aggregate
+          out=root/"d1f-fresh-scene-summary.json"
+          out.write_text(json.dumps(result,indent=2),encoding="utf-8")
+          for density, group in result["by_density"].items():
+              print("Density:", density, "C-B net by seed:", [x["net_C_minus_B"] for x in group["paired_C_vs_B"]])
+              print("Teacher:",group["expert"])
+              for variant in "ABC":
+                  print(variant,"successes by seed:",[x["success"] for x in group[variant]])
+          print("Aggregate:", json.dumps(aggregate))
+          PY
+          {
+            echo "## D1f: out-of-sample CLOSED-LOOP evaluation"
+            echo "- No training and no new expert training data"
+            echo "- Existing 9 checkpoints and expert baseline on new seeds \`3100..3123\`"
+            echo "- 30 parallel CPU simulators; 24 independent scenes per traffic density"
+            echo "- Report: \`$DLS_DATA_ROOT/reports/d1/d1f-fresh-scene-summary.json\`"
+            echo "- Still not a direct causal communication compensation experiment"
+          } >> "$GITHUB_STEP_SUMMARY"
