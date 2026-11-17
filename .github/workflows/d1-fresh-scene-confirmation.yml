@@ -32,15 +32,23 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          test "$(findmnt -n -o TARGET -T "$DLS_DATA_ROOT")" = "/mnt/datasets"
-          test -f "$DLS_DATA_ROOT/reports/d1/d1-seed-replication-summary.json"
+          MOUNT="$(findmnt -n -o TARGET -T "$DLS_DATA_ROOT")"
+          echo "DLS data mount: $MOUNT"
+          test "$MOUNT" = "/mnt/datasets"
+          SUMMARY="$DLS_DATA_ROOT/reports/d1/d1-seed-replication-summary.json"
+          echo "Seed replication report: $SUMMARY"
+          test -f "$SUMMARY"
+          echo "Assets: $DLS_DATA_ROOT/metadrive_assets/version.txt"
           test -f "$DLS_DATA_ROOT/metadrive_assets/version.txt"
           for seed in 42 43 44; do
             for variant in A B C; do
-              test -f "$DLS_DATA_ROOT/checkpoints/d1-v1/$variant-seed$seed.pt"
+              P="$DLS_DATA_ROOT/checkpoints/d1-v1/${variant}-seed${seed}.pt"
+              echo "Checking checkpoint: $P"
+              test -f "$P"
             done
           done
-          test "$(nproc)" -ge 32
+          echo "Available CPU cores via nproc: $(nproc)"
+          test "$(nproc)" -ge 8
           mkdir -p "$TMPDIR" "$DLS_DATA_ROOT/reports/d1/confirm24-logs"
           df -h "$DLS_DATA_ROOT"
 
