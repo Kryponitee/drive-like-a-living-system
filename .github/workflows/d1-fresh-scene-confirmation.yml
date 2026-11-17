@@ -47,8 +47,10 @@ jobs:
               test -f "$P"
             done
           done
-          echo "Available CPU cores via nproc: $(nproc)"
-          test "$(nproc)" -ge 8
+          echo "Physical/logical CPUs: $(nproc --all)"
+          echo "OpenMP-limited nproc: $(nproc) (expected 1 with OMP_NUM_THREADS=1)"
+          echo "Allowed CPU list: $(grep Cpus_allowed_list /proc/self/status)"
+          test "$(nproc --all)" -ge 32
           mkdir -p "$TMPDIR" "$DLS_DATA_ROOT/reports/d1/confirm24-logs"
           df -h "$DLS_DATA_ROOT"
 
