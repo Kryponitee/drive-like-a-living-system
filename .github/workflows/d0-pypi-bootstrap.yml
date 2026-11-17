@@ -1,0 +1,114 @@
+name: DLS D0 bootstrap via PyPI (no Git clone)
+
+on:
+  push:
+    paths:
+      - .github/workflows/d0-pypi-bootstrap.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: dls-pypi-bootstrap
+  cancel-in-progress: false
+
+jobs:
+  bootstrap:
+    runs-on: [self-hosted, Linux, X64]
+    timeout-minutes: 45
+    env:
+      DLS_DATA_ROOT: /mnt/datasets/lxb/dls
+      DLS_ENV: /home/ps/miniconda3/envs/dls-p0
+      XDG_CACHE_HOME: /mnt/datasets/lxb/dls/cache/xdg
+      PIP_CACHE_DIR: /mnt/datasets/lxb/dls/cache/pip
+      MPLCONFIGDIR: /mnt/datasets/lxb/dls/cache/matplotlib
+      TMPDIR: /mnt/datasets/lxb/dls/tmp
+      PYTHONNOUSERSITE: "1"
+    steps:
+      - name: Verify workspace and disk isolation
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(findmnt -n -o TARGET -T "$DLS_DATA_ROOT")" = "/mnt/datasets"
+          test "$(findmnt -n -o TARGET -T "$DLS_ENV")" = "/"
+          test -x "$DLS_ENV/bin/python"
+          mkdir -p "$PIP_CACHE_DIR" "$XDG_CACHE_HOME" "$MPLCONFIGDIR" "$TMPDIR" "$DLS_DATA_ROOT/reports/d0" "$DLS_DATA_ROOT/demonstrations"
+          echo "Conda environment: $DLS_ENV"
+          echo "Data disk: $DLS_DATA_ROOT"
+          df -h "$DLS_ENV" "$DLS_DATA_ROOT"
+
+      - name: Install MetaDrive 0.4.3 via verified PyPI mirror
+        shell: bash
+        run: |
+          set -euo pipefail
+          "$DLS_ENV/bin/python" -m pip install --no-input --disable-pip-version-check "metadrive-simulator==0.4.3"
+          "$DLS_ENV/bin/python" - <<'PY'
+          import importlib.metadata
+          import importlib.util
+          from pathlib import Path
+          print("metadrive-simulator:", importlib.metadata.version("metadrive-simulator"))
+          pkg_dir = Path(list(importlib.util.find_spec("metadrive").submodule_search_locations)[0])
+          print("Package directory:", pkg_dir)
+          assert str(pkg_dir).startswith("/home/ps/miniconda3/envs/dls-p0/lib/python3.10/site-packages")
+          PY
+
+      - name: Install official MetaDrive assets directly onto dedicated data disk
+        shell: bash
+        run: |
+          set -euo pipefail
+          ASSET_DIR="$DLS_DATA_ROOT/metadrive_assets"
+          ASSET_ZIP="$DLS_DATA_ROOT/third_party/metadrive-assets-0.4.3.zip"
+          UNPACK="$DLS_DATA_ROOT/third_party/metadrive-asset-extract-0.4.3"
+          mkdir -p "$DLS_DATA_ROOT/third_party"
+          if test ! -f "$ASSET_DIR/version.txt"; then
+            test ! -e "$ASSET_DIR"
+            test ! -e "$UNPACK"
+            if test ! -f "$ASSET_ZIP"; then
+              curl -fL --retry 4 --retry-all-errors --retry-delay 3 --connect-timeout 15 --max-time 900 \
+                "https://github.com/metadriverse/metadrive/releases/download/MetaDrive-0.4.3/assets.zip" -o "$ASSET_ZIP.part"
+              mv "$ASSET_ZIP.part" "$ASSET_ZIP"
+            fi
+            unzip -tqq "$ASSET_ZIP"
+            mkdir -p "$UNPACK"
+            unzip -q "$ASSET_ZIP" -d "$UNPACK"
+            test -f "$UNPACK/assets/version.txt"
+            mv "$UNPACK/assets" "$ASSET_DIR"
+            rmdir "$UNPACK"
+          fi
+          echo "Asset version: $(cat "$ASSET_DIR/version.txt")"
+          PKG_DIR="$("$DLS_ENV/bin/python" - <<'PY'
+          import importlib.util
+          from pathlib import Path
+          print(Path(list(importlib.util.find_spec("metadrive").submodule_search_locations)[0]))
+          PY
+          )"
+          if test -L "$PKG_DIR/assets"; then
+            test "$(readlink -f "$PKG_DIR/assets")" = "$ASSET_DIR"
+          elif test -d "$PKG_DIR/assets"; then
+            echo "MetaDrive assets path is a preexisting real directory. Refusing to overwrite it."
+            ls -la "$PKG_DIR/assets" | head -20
+            exit 1
+          else
+            ln -s "$ASSET_DIR" "$PKG_DIR/assets"
+          fi
+          test -f "$PKG_DIR/assets/version.txt"
+          echo "Asset symlink: $(readlink -f "$PKG_DIR/assets")"
+          sha256sum "$ASSET_ZIP" | tee "$DLS_DATA_ROOT/reports/d0/metadrive-assets-sha256.txt"
+
+      - name: Headless D0 structured-observation smoke test
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl -fL --retry 4 --retry-all-errors --connect-timeout 15 --max-time 120 \
+            "https://raw.githubusercontent.com/Kryponitee/drive-like-a-living-system/main/scripts/d0_smoke.py" \
+            -o "$TMPDIR/d0_smoke.py"
+          "$DLS_ENV/bin/python" "$TMPDIR/d0_smoke.py"
+          "$DLS_ENV/bin/python" -m pip freeze > "$DLS_DATA_ROOT/reports/d0/pip_freeze.txt"
+          {
+            echo "## DLS D0 MetaDrive"
+            echo "- Source: metadrive-simulator==0.4.3 from PyPI"
+            echo "- Conda environment: \`$DLS_ENV\` (system disk)"
+            echo "- Assets, cache, reports: \`$DLS_DATA_ROOT\` (data disk)"
+            echo "- Headless smoke: PASSED"
+          } >> "$GITHUB_STEP_SUMMARY"
