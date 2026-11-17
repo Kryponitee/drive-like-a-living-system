@@ -55,7 +55,7 @@ a=[a_{steer},a_{pedal}],
 - `scripts/d1_bc.py` 分别统计 `steer_mae` 和 `pedal_mae`；
 - `scripts/d6c_sender_relay_eval.py` 将网络两个输出直接送入 `MetaDriveEnv.step`；
 - `src/dls_local_motor.py` 的两个解码输出经 `tanh` 后进入MetaDrive；
-- MetaDrive官方动作文档明确规定二维动作的第0维为steering、第1维为signed throttle_brake，并将其映射为发动机力和制动力：https://metadrive-simulator.readthedocs.io/en/latest/action.html
+- MetaDrive官方动作文档明确规定二维动作的第0维为steering、第1维为signed throttle_brake，并将其映射为发动机力和制动力：https://metadrive-simulator.readthedocs.io/en/latest/action.html；官方车辆实现也将 `action[0]` 赋给steering、`action[1]`赋给throttle_brake，并按正负号切换发动机/制动：https://github.com/metadriverse/metadrive/blob/main/metadrive/component/vehicle/base_vehicle.py
 
 因此，**D1–D6c当前结果只能解释为“转向 + 有符号纵向踏板”接口下的探索性结果**，不能直接当作用户所指定的“独立绝对油门、制动输出”系统的证据。实验本身在当前MetaDrive接口下执行成功，但研究对象与目标接口存在偏差；不是训练代码数值错误。
 
