@@ -2,6 +2,7 @@
 
 from types import MethodType
 
+import gymnasium as gym
 import numpy as np
 
 
@@ -41,19 +42,28 @@ def _dual_pedal_set_action(vehicle, action):
 
 
 
-def configure_dual_pedal_action_space(env):
-    """把MetaDrive对外声明的二维动作空间收紧为[T, B]∈[0,1]^2。"""
-    space = env.action_space
-    assert tuple(space.shape) == (2,), space
-    env.action_space = type(space)(
-        low=np.zeros(2, dtype=np.float32),
-        high=np.ones(2, dtype=np.float32),
-        dtype=np.float32,
-    )
-    assert tuple(env.action_space.shape) == (2,)
-    assert np.allclose(env.action_space.low, np.zeros(2, dtype=np.float32))
-    assert np.allclose(env.action_space.high, np.ones(2, dtype=np.float32))
-    return env.action_space
+class DualPedalActionSpace(gym.Wrapper):
+    """保留MetaDrive物理执行，只把外部策略接口声明为[T, B]∈[0,1]^2。"""
+
+    def __init__(self, env):
+        assert tuple(env.action_space.shape) == (2,), env.action_space
+        super().__init__(env)
+        self.action_space = gym.spaces.Box(
+            low=np.zeros(2, dtype=np.float32),
+            high=np.ones(2, dtype=np.float32),
+            dtype=np.float32,
+        )
+        assert tuple(self.action_space.shape) == (2,)
+        assert np.allclose(self.action_space.low, np.zeros(2, dtype=np.float32))
+        assert np.allclose(self.action_space.high, np.ones(2, dtype=np.float32))
+
+    @property
+    def agent(self):
+        return self.env.agent
+
+
+def wrap_dual_pedal_env(env):
+    return DualPedalActionSpace(env)
 
 def install_dual_pedal_adapter(vehicle, steering_controller):
     """将env.step([T, B])适配为独立发动机力和制动力。每次新建/重置车辆后安装。"""
