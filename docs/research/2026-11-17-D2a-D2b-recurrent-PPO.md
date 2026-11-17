@@ -77,3 +77,29 @@ GitHub Actions: https://github.com/Kryponitee/drive-like-a-living-system/actions
 D2c: https://github.com/Kryponitee/drive-like-a-living-system/actions/runs/44012974852
 
 如果探索幅度已经破坏大多数成功轨迹，D2d 再尝试 **只降低动作方差** 的等预算 PPO 复核；若几乎不影响闭环，则优先诊断 PPO 优势/奖励与价值基线，而非继续削减探索。两种情况下 BC、PPO 权重都保留原样。
+
+
+## D2c：冻结 BC 的探索噪声消融（实测完成）
+
+[Github Actions #44012974852](https://github.com/Kryponitee/drive-like-a-living-system/actions/runs/44012974852) — SUCCESS。
+
+复用相同 A/B/C BC 权重和 normalization，场景 seeds 4200–4223、密度 0.10、无训练。只改变 tanh 前高斯噪声标准差：
+
+| sigma | A success /24 | B success /24 | C success /24 |
+|---:|---:|---:|---:|
+| 0.00 | 16 | 18 | 18 |
+| 0.05 | 12 | 17 | 16 |
+| 0.10 | 6 | 9 | 11 |
+| 0.27 | **1** | **1** | **1** |
+
+在 sigma=0.27 时，A/B/C 分别有 **21/23/22** 个场景驶离道路；每步平均绝对转向动作偏移约 **0.204/0.207/0.206**。这比 D2b 最初认为的数学 PPO bug 更能解释训练期几乎无成功轨迹的根因：**原 PPO 的探索方差本身使成功 BC 策略接近失效**。但尚不能证明 PPO 后的全部退化仅由噪声造成。
+
+## D2d：只改变初始探索尺度的反事实 PPO 复训（事先计划）
+
+[GitHub Actions D2d](https://github.com/Kryponitee/drive-like-a-living-system/actions/runs/44013255699)。
+
+- **唯一机制调整**：tanh 前初始探索标准差 `sigma≈0.2725` 改为 `sigma=0.05`。为了允许这个初值，log_std 下界从 -2.5 扩展到 -4.0；这属于使单一探索尺度干预生效的技术必要修改。
+- 其它模型参数、BC seed42、PPO 4,096 环境步、rollout128、截断 BPTT32、两个 PPO epoch、优化器与奖励不变，三模型各使用一张 GPU；无需新专家数据/安装。
+- 评估四组（原 BC、D2b 高噪声 PPO、D2d 低噪声 PPO、确定性专家）在全新 `4300..4311` 场景×密度(0/0.1/0.25)下的闭环成功/撞车/驶离道路。
+- **假设**：低噪声训练期间出现显著更多成功 episode，而且相对于 BC 的闭环退化明显减少；否则优先调查 PPO 收益/奖励与价值网络，而不继续盲目调探索。
+- 即使实验支持该假设，单训练初始化种子、短预算不能作为直接通信 C 相对 B 的因果科学结论。
