@@ -37,7 +37,7 @@ jobs:
           test "$(findmnt -n -o TARGET -T "$DLS_DATA_ROOT")" = "/mnt/datasets"
           test -x "$DLS_ENV/bin/python"
           test -s "$DLS_DATA_ROOT/metadrive_assets/version.txt"
-          test ! -e "$DLS_DATA_ROOT/reports/d0-dual-pedal/actuator-smoke.json"
+          test ! -e "$DLS_DATA_ROOT/reports/d0-dual-pedal/actuator-smoke-${GITHUB_RUN_ID}.json"
           mkdir -p "$TMPDIR" "$DLS_DATA_ROOT/reports/d0-dual-pedal"
           "$DLS_ENV/bin/python" - <<'PY'
           import metadrive, numpy, sys
@@ -73,10 +73,10 @@ jobs:
         run: |
           set -euo pipefail
           "$DLS_ENV/bin/python" "$TMPDIR/d0_dual_pedal_smoke.py" | tee "$DLS_DATA_ROOT/reports/d0-dual-pedal/console-${GITHUB_RUN_ID}.json"
-          test -s "$DLS_DATA_ROOT/reports/d0-dual-pedal/actuator-smoke.json"
+          test -s "$DLS_DATA_ROOT/reports/d0-dual-pedal/actuator-smoke-${GITHUB_RUN_ID}.json"
           "$DLS_ENV/bin/python" - <<'PY'
           import json, os
-          p=os.path.join(os.environ["DLS_DATA_ROOT"],"reports","d0-dual-pedal","actuator-smoke.json")
+          p=os.path.join(os.environ["DLS_DATA_ROOT"],"reports","d0-dual-pedal","actuator-smoke-"+os.environ["GITHUB_RUN_ID"]+".json")
           r=json.load(open(p))
           assert r["all_passed"] and r["num_episodes"] == 3
           print("D0-prime PASS:", r["num_episodes"], "seeds")
@@ -91,5 +91,5 @@ jobs:
             printf '%s\n' "- Result: PASS on 3 seeds; no model training"
             printf '%s\n' "- Interface: two independent values in [0,1], applied separately as engine force and brake force"
             printf '%s\n' "- Steering: fixed zero on straight map S"
-            printf '%s\n' "- Report: `$DLS_DATA_ROOT/reports/d0-dual-pedal/actuator-smoke.json`"
+            printf '%s\n' "- Report: `$DLS_DATA_ROOT/reports/d0-dual-pedal/actuator-smoke-${GITHUB_RUN_ID}.json`"
           } >> "$GITHUB_STEP_SUMMARY"
