@@ -1,6 +1,6 @@
 # Drive Like a Living System (DLS)
 
-**Current stage (2026-11-17): P0 protocol fixed; D0 headless simulator and expert-data pilot completed; D1 learning and coordination experiments not started.**
+**Current stage (2026-11-17): D0 completed; D1 expert collection verified (91,717 train + 9,822 validation transitions); three-model BC pilot running. Coordination mechanism evidence not yet available.**
 
 ## Research question
 
@@ -24,7 +24,13 @@ We **do not** prescribe driving-skill labels to internal units or assume that a 
 - [2026-11-17 — Environment and expert audit (real server logs and outcomes)](docs/research/2026-11-17-D0-environment-and-expert-audit.md)
 - Dataset and asset root: `/mnt/datasets/lxb/dls/` on a separate volume.
 - Python Conda environment: `/home/ps/miniconda3/envs/dls-p0/` on system disk.
-- Next research gate: scenario coverage / success-filtered teacher demonstrations before BC and model experiments.
+- D0 traffic/interaction audits completed; proceed with the bounded D1 pilot (do not assume module coordination is established).
+
+## D1 execution evidence
+
+- [D1 shared expert dataset and A/B/C BC pilot design](docs/research/2026-11-17-D1-data-and-BC-pilot.md)
+- [Completed 27-worker dataset collection](https://github.com/Kryponitee/drive-like-a-living-system/actions/runs/44008816875)
+- [A/B/C BC + closed-loop evaluation workflow](https://github.com/Kryponitee/drive-like-a-living-system/actions/runs/44009291227) (running as of latest update; no results assumed)
 
 ## Previous records (retained for provenance)
 
