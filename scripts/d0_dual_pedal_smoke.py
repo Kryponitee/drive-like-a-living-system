@@ -11,7 +11,7 @@ import numpy as np
 from metadrive.envs.metadrive_env import MetaDriveEnv
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from dls_dual_pedal_adapter import configure_dual_pedal_action_space, install_dual_pedal_adapter
+from dls_dual_pedal_adapter import install_dual_pedal_adapter, wrap_dual_pedal_env
 
 
 DATA_ROOT = Path(os.environ["DLS_DATA_ROOT"]).resolve()
@@ -30,7 +30,7 @@ BRAKE_STEPS = 40
 
 
 def run_one(seed):
-    env = MetaDriveEnv(
+    env = wrap_dual_pedal_env(MetaDriveEnv(
         {
             "use_render": False,
             "image_observation": False,
@@ -41,11 +41,10 @@ def run_one(seed):
             "horizon": 600,
             "log_level": 50,
         }
-    )
+    ))
     obs, reset_info = env.reset(seed=seed)
     obs = np.asarray(obs, dtype=np.float32)
     assert obs.ndim == 1 and np.isfinite(obs).all()
-    configure_dual_pedal_action_space(env)
     assert env.action_space.shape == (2,), env.action_space
     assert np.allclose(env.action_space.low, [0.0, 0.0])
     assert np.allclose(env.action_space.high, [1.0, 1.0])
