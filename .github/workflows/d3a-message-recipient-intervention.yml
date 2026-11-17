@@ -1,0 +1,195 @@
+name: DLS D3a frozen BC recipient-specific intermodule message intervention
+
+on:
+  push:
+    paths:
+      - .github/workflows/d3a-message-recipient-intervention.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: dls-d3a-message-recipient-identity
+  cancel-in-progress: false
+
+jobs:
+  intervention:
+    runs-on: [self-hosted, Linux, X64]
+    timeout-minutes: 35
+    env:
+      DLS_DATA_ROOT: /mnt/datasets/lxb/dls
+      DLS_ENV: /home/ps/miniconda3/envs/dls-p0
+      TMPDIR: /mnt/datasets/lxb/dls/tmp
+      PYTHONNOUSERSITE: "1"
+      OMP_NUM_THREADS: "1"
+      MKL_NUM_THREADS: "1"
+      OPENBLAS_NUM_THREADS: "1"
+      NUMEXPR_NUM_THREADS: "1"
+    steps:
+      - name: Confirm D2n-A evidence, source D1 BC and untouched D3a output
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(findmnt -n -o TARGET -T "$DLS_DATA_ROOT")" = "/mnt/datasets"
+          test -f "$DLS_DATA_ROOT/reports/d2n-a/d2n-a-summary.json"
+          test -f "$DLS_DATA_ROOT/reports/d2n-a/d2n-a-b-timing-audit.json"
+          for variant in B C; do
+            test -f "$DLS_DATA_ROOT/checkpoints/d1-v1/$variant-seed42.pt"
+          done
+          test "$(df -Pk "$DLS_DATA_ROOT" | awk 'NR==2 {print $4}')" -gt 10485760
+          test ! -e "$DLS_DATA_ROOT/reports/d3a/d3a-summary.json"
+          mkdir -p "$TMPDIR" "$DLS_DATA_ROOT/reports/d3a/logs"
+          sha256sum "$DLS_DATA_ROOT/checkpoints/d1-v1/"{B,C}"-seed42.pt" > "$DLS_DATA_ROOT/reports/d3a/bc-sha256-before.txt"
+          "$DLS_ENV/bin/python" - <<'PY'
+          import json
+          from pathlib import Path
+          p=Path("/mnt/datasets/lxb/dls/reports/d2n-a/d2n-a-summary.json")
+          r=json.loads(p.read_text())
+          assert set(r["models"])==set("ABC")
+          assert r["models"]["C"]["by_density"]["0.1"]["PPO_success"] == 9
+          assert r["models"]["C"]["by_density"]["0.1"]["BC_success"] == 13
+          print("Verified D2n-A complete, proceeding with original BC C and B, not degraded PPO.")
+          PY
+
+      - name: Fetch original A B C actor and one surgical message intervention script
+        shell: bash
+        run: |
+          set -euo pipefail
+          for item in "src/dls_p0.py:dls_p0.py" \
+                      "scripts/d3a_message_recipient_intervention.py:d3a.py"; do
+            SRC="${item%%:*}"
+            TARGET="${item#*:}"
+            RAW="https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/${GITHUB_SHA}/$SRC"
+            OK=0
+            for URL in "https://gh-proxy.com/$RAW" "https://ghproxy.net/$RAW" "$RAW"; do
+              if curl -fLsS --connect-timeout 10 --max-time 60 "$URL" -o "$TMPDIR/$TARGET"; then
+                OK=1
+                break
+              fi
+            done
+            test "$OK" -eq 1
+            "$DLS_ENV/bin/python" -m py_compile "$TMPDIR/$TARGET"
+            sha256sum "$TMPDIR/$TARGET"
+          done
+
+      - name: Run eight independent frozen B C control and rotation evaluations on new scenes
+        shell: bash
+        run: |
+          set -euo pipefail
+          declare -a PIDS=()
+          declare -a LABELS=()
+          for variant in B C; do
+            for mode in baseline rotate; do
+              for density in 0.10 0.25; do
+                label="$variant-$mode-$density"
+                "$DLS_ENV/bin/python" "$TMPDIR/d3a.py" \
+                  --variant "$variant" --mode "$mode" --density "$density" \
+                  > "$DLS_DATA_ROOT/reports/d3a/logs/$label.log" 2>&1 &
+                PIDS+=("$!")
+                LABELS+=("$label")
+              done
+            done
+          done
+          test "${#PIDS[@]}" -eq 8
+          failed=0
+          for i in "${!PIDS[@]}"; do
+            label="${LABELS[$i]}"
+            if wait "${PIDS[$i]}"; then
+              echo "PASS $label"
+              tail -1 "$DLS_DATA_ROOT/reports/d3a/logs/$label.log"
+            else
+              echo "FAIL $label"
+              tail -100 "$DLS_DATA_ROOT/reports/d3a/logs/$label.log"
+              failed=1
+            fi
+          done
+          test "$failed" -eq 0
+
+      - name: Aggregate new paired scenes with baseline parity and message-energy invariance
+        shell: bash
+        run: |
+          set -euo pipefail
+          "$DLS_ENV/bin/python" - <<'PY'
+          import json
+          from pathlib import Path
+          root=Path("/mnt/datasets/lxb/dls/reports/d3a")
+          report={
+              "stage":"D3a single-point frozen BC message recipient identity intervention",
+              "fresh_scenes":list(range(31000,31024)),
+              "densities":[0.1,0.25],
+              "actor_source":"original unmodified D1 BC seed42 B and C",
+              "intervention":"roll aux message recipients +1, preserves per-step message multiset and L2 energy",
+              "new_training_steps":0,
+              "matched_local_B_control_is_not_pure_negation_of_C_cross_communication":True,
+              "models":{},
+          }
+          for variant in "BC":
+              per={}
+              for density in (0.1,0.25):
+                  controls={}
+                  for mode in ("baseline","rotate"):
+                      r=json.loads((root/f"eval-{variant}-{mode}-density{density:.2f}.json").read_text())
+                      assert r["eval_seeds"]==list(range(31000,31024))
+                      assert [e["seed"] for e in r["episodes"]]==list(range(31000,31024))
+                      assert r["max_original_step_parity_error"] < 2e-6
+                      assert r["max_message_L2_squared_energy_difference"] < 1e-3
+                      assert r["model_training_updates"]==0
+                      controls[mode]=r
+                  baseline=controls["baseline"]
+                  rotated=controls["rotate"]
+                  gains=sum(not x["success"] and y["success"] for x,y in zip(
+                      baseline["episodes"],rotated["episodes"]))
+                  losses=sum(x["success"] and not y["success"] for x,y in zip(
+                      baseline["episodes"],rotated["episodes"]))
+                  paired_reward=[
+                      new["reward"]-old["reward"]
+                      for old,new in zip(baseline["episodes"],rotated["episodes"])
+                  ]
+                  paired_completion=[
+                      new["route_completion"]-old["route_completion"]
+                      for old,new in zip(baseline["episodes"],rotated["episodes"])
+                  ]
+                  per[str(density)]={
+                      "baseline_success":baseline["success"],
+                      "rotate_success":rotated["success"],
+                      "baseline_mean_raw_reward":baseline["mean_raw_reward"],
+                      "rotate_mean_raw_reward":rotated["mean_raw_reward"],
+                      "mean_paired_reward_change":sum(paired_reward)/24,
+                      "mean_paired_completion_change":sum(paired_completion)/24,
+                      "rotation_only_success":gains,
+                      "baseline_only_success":losses,
+                      "paired_success_delta":gains-losses,
+                      "rotated_aux_abs_mean_difference":rotated["mean_message_recipient_change_abs_per_tick"],
+                      "max_message_energy_difference":rotated["max_message_L2_squared_energy_difference"],
+                      "paired_rewards":paired_reward,
+                  }
+              report["models"][variant]=per
+          for d in ("0.1","0.25"):
+              report[f"control_relative_reward_change_C_minus_B_at_{d}"] = (
+                  report["models"]["C"][d]["mean_paired_reward_change"]-
+                  report["models"]["B"][d]["mean_paired_reward_change"]
+              )
+          output=root/"d3a-summary.json"
+          assert not output.exists()
+          output.write_text(json.dumps(report,ensure_ascii=False,indent=2),encoding="utf-8")
+          print("D3a paired message-routing intervention results")
+          for v in "BC":
+              for d,r in report["models"][v].items():
+                  print(v,d,"baseline→rotate success",
+                        r["baseline_success"],"→",r["rotate_success"],
+                        "reward delta",round(r["mean_paired_reward_change"],2),
+                        "completion delta",round(r["mean_paired_completion_change"],3),
+                        "message abs delta",round(r["rotated_aux_abs_mean_difference"],5))
+          print("NOTE: target routing perturbation is a sensitivity test, not yet proof of compensation.")
+          PY
+          sha256sum "$DLS_DATA_ROOT/checkpoints/d1-v1/"{B,C}"-seed42.pt" > "$DLS_DATA_ROOT/reports/d3a/bc-sha256-after.txt"
+          cmp "$DLS_DATA_ROOT/reports/d3a/bc-sha256-before.txt" "$DLS_DATA_ROOT/reports/d3a/bc-sha256-after.txt"
+          {
+            echo "## D3a frozen BC message recipient intervention"
+            echo "- Four paired conditions B/C × original/rotated messages, 2 densities, 24 new scene seeds"
+            echo "- Exact original step parity & message energy conservation checked"
+            echo "- No PPO training or original checkpoint changes"
+            echo "- Summary: \`$DLS_DATA_ROOT/reports/d3a/d3a-summary.json\`"
+            echo "- Causal specificity only; no feedback compensation inference from routing loss"
+          } >> "$GITHUB_STEP_SUMMARY"
