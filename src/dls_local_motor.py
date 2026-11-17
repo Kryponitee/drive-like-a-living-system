@@ -55,7 +55,7 @@ class LocalMotorController(nn.Module):
     def initial_state(self, batch_size, device):
         return torch.zeros(batch_size, MOTORS, HIDDEN, device=device)
 
-    def step(self, observation, state, t, block_messages=False, return_diagnostics=False, unit_mask=None):
+    def step(self, observation, state, t, block_messages=False, return_diagnostics=False, unit_mask=None, blocked_sender=None):
         assert observation.ndim == 2 and observation.shape[-1] == OBS_DIM
         assert state.shape == (observation.shape[0], MOTORS, HIDDEN)
         local = (observation @ self.projection).reshape(-1, MOTORS, LOCAL_DIM)
@@ -63,9 +63,19 @@ class LocalMotorController(nn.Module):
         values = torch.einsum("bkh,khm->bkm", state, self.value_weights)
         gate = torch.sigmoid((queries * values).sum(-1, keepdim=True) / math.sqrt(MESSAGE_DIM))
         if self.arm == "local":
+            assert blocked_sender is None
             source = values
         else:
-            source = (values.sum(dim=1, keepdim=True) - values) / (MOTORS - 1)
+            if blocked_sender is not None:
+                assert isinstance(blocked_sender, int) and 0 <= blocked_sender < MOTORS
+                # 撤销指定发送者发往其他7个接收模块的旧状态消息。
+                # 给自身的消息本来就不存在，因此不改变其局部状态更新。
+                sender_mask = torch.ones(MOTORS, dtype=values.dtype, device=values.device)
+                sender_mask[blocked_sender] = 0.0
+                retained = values * sender_mask[None, :, None]
+                source = (retained.sum(dim=1, keepdim=True) - retained) / (MOTORS - 1)
+            else:
+                source = (values.sum(dim=1, keepdim=True) - values) / (MOTORS - 1)
         message = gate * source
         if block_messages:
             assert self.arm == "cross", "block_messages is a causal intervention on trained cross only"
