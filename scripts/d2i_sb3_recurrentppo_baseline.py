@@ -39,7 +39,9 @@ class SeedRangeMetaDriveEnv(MetaDriveEnv):
                 seed = start + (original % n)
                 print(f"SB3 seed mapping: requested={original} -> MetaDrive={seed}, "
                       f"allowed=[{start},{start + n})", flush=True)
-        return super().reset(seed=seed, options=options)
+        # MetaDrive 0.4.3 accepts reset(seed=...), but does not expose Gymnasium's options keyword.
+        assert options is None or options == {}, "MetaDrive 0.4.3 cannot consume nonempty reset options"
+        return super().reset(seed=seed)
 
 
 def make_env(worker_index):
