@@ -1,11 +1,9 @@
 name: DLS D0 expert data audit
 
 on:
-  workflow_run:
-    workflows:
-      - DLS migrate three retired environments and bootstrap P0
-    types:
-      - completed
+  push:
+    paths:
+      - .github/workflows/d0-expert-audit.yml
   workflow_dispatch:
 
 permissions:
@@ -13,7 +11,6 @@ permissions:
 
 jobs:
   expert-audit:
-    if: github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success'
     runs-on: [self-hosted, Linux, X64]
     timeout-minutes: 25
     env:
@@ -28,7 +25,7 @@ jobs:
           set -euo pipefail
           test "$(findmnt -n -o TARGET -T "$DLS_DATA_ROOT")" = "/mnt/datasets"
           test -x /home/ps/miniconda3/envs/dls-p0/bin/python
-          test -d "$DLS_DATA_ROOT/third_party/metadrive/metadrive/assets"
+          test -f "$DLS_DATA_ROOT/metadrive_assets/version.txt"
 
       - name: Evaluate expert and save small structured demonstration probe
         shell: bash
