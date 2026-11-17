@@ -57,6 +57,10 @@ class DualPedalActionSpace(gym.Wrapper):
         assert np.allclose(self.action_space.low, np.zeros(2, dtype=np.float32))
         assert np.allclose(self.action_space.high, np.ones(2, dtype=np.float32))
 
+    def reset(self, *, seed=None, options=None):
+        assert options is None
+        return self.env.reset(seed=seed)
+
     @property
     def agent(self):
         return self.env.agent
