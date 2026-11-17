@@ -69,3 +69,28 @@ GitHub Actions #44004713319：**SUCCESS**。在系统盘 Conda 环境 `/home/ps/
 - Workflow: https://github.com/Kryponitee/drive-like-a-living-system/actions/runs/44005436462
 - 结果文件（待验证）：`/mnt/datasets/lxb/dls/reports/d0/expert_traffic_coverage.json`
 - 成功轨迹候选：`/mnt/datasets/lxb/dls/demonstrations/d0c_success_only/`
+
+
+## D0c 专家交通密度控制实验（已完成）
+
+原始日志：https://github.com/Kryponitee/drive-like-a-living-system/actions/runs/44005436462
+
+- 固定：MetaDrive 0.4.3，map=3，deterministic PPO expert，seed 0–11，最大 800 步。
+- 仅操纵交通密度：0.00、0.10、0.25。
+- **独立变量与结果**：
+
+| 交通密度 | 到达 | 碰撞 | 超时 | 转向激活步占比 (\|steer\|>0.1) | 刹车步占比 (pedal<-0.05) | 成功 episode 样本步数 |
+|---:|---:|---:|---:|---:|---:|---:|
+| 0.00 | 12/12 | 0/12 | 0/12 | 0.117 | 0.132 | 4,230 |
+| 0.10 | 9/12 | 3/12 | 0/12 | 0.111 | 0.144 | 4,129 |
+| 0.25 | 6/12 | 3/12 | 3/12 | 0.131 | 0.151 | 3,321 |
+
+**结论（仅限测试配置）**：专家在无交通驾驶可达到 12/12，但交通越密集，到达率越低；在当前 12 seed 下 density=0.25 额外出现 3 个超时。当前专家适合作为基础道路跟踪行为的示范来源，不能直接视为高质量的全面交通交互专家。
+
+**重要限制**：`pedal<-0.05` 的动作比例只是制动行为的代理：即使 density=0 时也有 13.2% 的步数触发，不能据此认定专家在执行跟车制动；是否有实际前车交互仍需特权物理状态的只读诊断。36 场景样本量不足以精确估计置信区间和跨地图泛化。
+
+- 报告：`/mnt/datasets/lxb/dls/reports/d0/expert_traffic_coverage.json`
+- **只保存成功轨迹候选**：`/mnt/datasets/lxb/dls/demonstrations/d0c_success_only/`，共 11,680 转移样本。
+- D0d 交互语义诊断：https://github.com/Kryponitee/drive-like-a-living-system/actions/runs/44007689347 （当下执行中；结果尚未审查）。
+
+**D1 的门槛**：仅获得成功 episode 不足以证明覆盖目标任务。需确认“成功轨迹中真实存在何种前车/近车交互”和独立训练测试划分，然后才生成正式大样本 BC 数据。
