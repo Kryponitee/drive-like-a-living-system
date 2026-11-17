@@ -3,7 +3,6 @@ name: DLS D1-prime collect longitudinal dual-pedal dataset
 on:
   push:
     paths:
-      - .github/workflows/d1-longitudinal-collect.yml
       - scripts/d1_longitudinal_collect.py
       - src/dls_dual_pedal_adapter.py
   workflow_dispatch:
@@ -156,7 +155,7 @@ jobs:
           PY
           {
             printf '%s\n' "## DLS D1-prime longitudinal dataset"
-            printf '%s\n' "- Dataset ID: `d1-longitudinal-v1-${GITHUB_RUN_ID}`"
+            printf '%s\n' "- Dataset ID: d1-longitudinal-v1-${GITHUB_RUN_ID}"
             printf '%s\n' "- 90 train + 30 validation + 30 test episodes; three traffic densities"
             printf '%s\n' "- 9 isolated CPU workers; disjoint scenario seeds; labels are independent [throttle, brake]"
             printf '%s\n' "- Old D1 data/checkpoints untouched"
