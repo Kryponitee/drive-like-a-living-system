@@ -1,0 +1,108 @@
+name: DLS D2j resume official RecurrentPPO to 300k frames
+
+on:
+  push:
+    paths:
+      - .github/workflows/d2j-official-300k.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: dls-d2j-official-300k
+  cancel-in-progress: false
+
+jobs:
+  extend_official_baseline:
+    runs-on: [self-hosted, Linux, X64]
+    timeout-minutes: 65
+    env:
+      DLS_DATA_ROOT: /mnt/datasets/lxb/dls
+      BASE_ENV: /home/ps/miniconda3/envs/dls-p0
+      SB3_VENV: /home/ps/miniconda3/envs/dls-sb3-compat
+      TMPDIR: /mnt/datasets/lxb/dls/tmp
+      PYTHONNOUSERSITE: "1"
+      XDG_CACHE_HOME: /mnt/datasets/lxb/dls/cache/xdg
+      OMP_NUM_THREADS: "1"
+      OPENBLAS_NUM_THREADS: "1"
+      MKL_NUM_THREADS: "1"
+      NUMEXPR_NUM_THREADS: "1"
+    steps:
+      - name: Confirm successful official 16k source, compatible venv, disjoint new train seeds
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(findmnt -n -o TARGET -T "$DLS_DATA_ROOT")" = "/mnt/datasets"
+          test "$(findmnt -n -o TARGET -T "$SB3_VENV")" = "/"
+          test -f "$SB3_VENV/pyvenv.cfg"
+          test -f "$DLS_DATA_ROOT/reports/d2i/official-rl-smoke.json"
+          test -f "$DLS_DATA_ROOT/checkpoints/d2i/official-recurrentppo-16k.zip"
+          test -f "$DLS_DATA_ROOT/checkpoints/d2i/official-recurrentppo-vecnormalize-16k.pkl"
+          for path in "$DLS_DATA_ROOT/checkpoints/d2j/official-recurrentppo-300k.zip" \
+                      "$DLS_DATA_ROOT/checkpoints/d2j/official-recurrentppo-vecnormalize-300k.pkl" \
+                      "$DLS_DATA_ROOT/reports/d2j/official-ppo-300k.json"; do
+            test ! -e "$path"
+          done
+          test "$(df -Pk "$DLS_DATA_ROOT" | awk 'NR==2 {print $4}')" -gt 10485760
+          mkdir -p "$TMPDIR" "$DLS_DATA_ROOT/reports/d2j" "$DLS_DATA_ROOT/checkpoints/d2j" "$DLS_DATA_ROOT/tensorboard/d2j"
+          "$SB3_VENV/bin/python" - <<'PY'
+          import torch,gymnasium,stable_baselines3,sb3_contrib,json
+          from pathlib import Path
+          assert torch.__version__.startswith("2.5.1")
+          assert gymnasium.__version__=="1.1.1"
+          assert stable_baselines3.__version__==sb3_contrib.__version__=="2.6.0"
+          meta=json.loads(Path("/mnt/datasets/lxb/dls/reports/d2i/official-rl-smoke.json").read_text())
+          assert meta["train_steps_across_all_environments"] == 16384
+          assert meta["eval_seeds"] == list(range(5400,5412))
+          print("PINNED OFFICIAL STACK PASS, original seed42 ABC models unaffected.")
+          PY
+          df -h "$DLS_DATA_ROOT"
+
+      - name: Fetch only versioned 300k continuation script, no new installations
+        shell: bash
+        run: |
+          set -euo pipefail
+          RAW="https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/${GITHUB_SHA}/scripts/d2j_official_recurrentppo_extend.py"
+          OK=0
+          for URL in "https://gh-proxy.com/$RAW" "https://ghproxy.net/$RAW" "$RAW"; do
+            if curl -fLsS --connect-timeout 10 --max-time 60 "$URL" -o "$TMPDIR/d2j_official_extend.py"; then
+              OK=1
+              break
+            fi
+          done
+          test "$OK" = 1
+          "$SB3_VENV/bin/python" -m py_compile "$TMPDIR/d2j_official_extend.py"
+          sha256sum "$TMPDIR/d2j_official_extend.py"
+
+      - name: Reuse original checkpoint and VecNormalize to continue to 300032 total frames
+        shell: bash
+        run: |
+          set -euo pipefail
+          "$SB3_VENV/bin/python" "$TMPDIR/d2j_official_extend.py"
+          test -s "$DLS_DATA_ROOT/reports/d2j/official-ppo-300k.json"
+          test -s "$DLS_DATA_ROOT/checkpoints/d2j/official-recurrentppo-300k.zip"
+          test -s "$DLS_DATA_ROOT/checkpoints/d2j/official-recurrentppo-vecnormalize-300k.pkl"
+          "$SB3_VENV/bin/python" - <<'PY'
+          import json
+          from pathlib import Path
+          report=json.loads(Path("/mnt/datasets/lxb/dls/reports/d2j/official-ppo-300k.json").read_text())
+          assert report["source_frames"]==16384
+          assert report["target_frames"]==300032
+          assert report["additional_training_frames"]==283648
+          assert report["eval_scenes"] == list(range(5500,5524))
+          assert len(report["all_source_episodes"])==len(report["all_extended_episodes"])==24
+          assert report["previous_ABC_checkpoints_untouched"]
+          print("Final official 300k smoke verified: before/after success",
+                report["source_16k_on_fresh_scenes"]["success"],
+                report["extended_300k_on_fresh_scenes"]["success"])
+          PY
+          {
+            echo "## D2j completed official 300k-frame RecurrentPPO reference"
+            echo "- Resumed existing official checkpoint & VecNormalize after 16384 frames"
+            echo "- Disjoint MetaDrive training seed ranges 6000..6319, 4 workers"
+            echo "- Same official SB3/Contrib 2.6.0 environment, unchanged core dls-p0"
+            echo "- Compared original and extended models on identical fresh seeds 5500..5523"
+            echo "- Summary: \`$DLS_DATA_ROOT/reports/d2j/official-ppo-300k.json\`"
+            echo "- This is still NOT A/B/C architecture comparison."
+          } >> "$GITHUB_STEP_SUMMARY"
