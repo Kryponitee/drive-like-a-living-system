@@ -1,0 +1,178 @@
+name: DLS D1 three-GPU A-B-C BC pilot and closed-loop test
+
+on:
+  push:
+    paths:
+      - .github/workflows/d1-bc-pilot.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: dls-d1-bc-v1
+  cancel-in-progress: false
+
+jobs:
+  train_and_evaluate:
+    runs-on: [self-hosted, Linux, X64]
+    timeout-minutes: 100
+    env:
+      DLS_DATA_ROOT: /mnt/datasets/lxb/dls
+      DLS_ENV: /home/ps/miniconda3/envs/dls-p0
+      TMPDIR: /mnt/datasets/lxb/dls/tmp
+      XDG_CACHE_HOME: /mnt/datasets/lxb/dls/cache/xdg
+      PYTHONNOUSERSITE: "1"
+      OMP_NUM_THREADS: "1"
+      OPENBLAS_NUM_THREADS: "1"
+      MKL_NUM_THREADS: "1"
+      NUMEXPR_NUM_THREADS: "1"
+      DLS_D1_TRAINING: "1"
+    steps:
+      - name: Verify cached data, no data/test leakage and existing CUDA runtime
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(findmnt -n -o TARGET -T "$DLS_DATA_ROOT")" = "/mnt/datasets"
+          test "$(findmnt -n -o TARGET -T "$DLS_ENV")" = "/"
+          test -f "$DLS_DATA_ROOT/reports/d1/collection-summary.json"
+          "$DLS_ENV/bin/python" -c "import torch; assert torch.cuda.is_available() and torch.cuda.device_count() >= 3"
+          test "$(df -Pk "$DLS_DATA_ROOT" | awk 'NR==2 {print $4}')" -gt 10485760
+          mkdir -p "$TMPDIR" "$DLS_DATA_ROOT/reports/d1/train-logs" "$DLS_DATA_ROOT/reports/d1/eval-logs" "$DLS_DATA_ROOT/checkpoints/d1-v1" "$DLS_DATA_ROOT/tensorboard/d1-v1"
+          df -h "$DLS_DATA_ROOT" "$DLS_ENV"
+
+      - name: Fetch fixed-version model, trainer, evaluator once for all experiments
+        shell: bash
+        run: |
+          set -euo pipefail
+          for item in "src/dls_p0.py:dls_p0.py" "scripts/d1_bc.py:d1_bc.py" "scripts/d1_eval.py:d1_eval.py"; do
+            SOURCE="${item%%:*}"
+            TARGET="${item#*:}"
+            RAW="https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/${GITHUB_SHA}/$SOURCE"
+            OK=0
+            for URL in "https://gh-proxy.com/$RAW" "https://ghproxy.net/$RAW" "$RAW"; do
+              if curl -fLsS --connect-timeout 10 --max-time 60 "$URL" -o "$TMPDIR/$TARGET"; then
+                OK=1
+                break
+              fi
+            done
+            test "$OK" -eq 1
+            "$DLS_ENV/bin/python" -m py_compile "$TMPDIR/$TARGET"
+            sha256sum "$TMPDIR/$TARGET"
+          done
+          "$DLS_ENV/bin/python" - <<'PY'
+          import os, sys
+          sys.path.insert(0, os.environ["TMPDIR"])
+          import torch
+          from dls_p0 import model_info, nparams, run_sequence
+          b, _ = model_info("B")
+          c, _ = model_info("C")
+          assert nparams(b) == nparams(c), "B/C parameter count mismatch"
+          for variant in ("A", "B", "C"):
+              model, info = model_info(variant)
+              result = run_sequence(model, torch.randn(2, 5, 259))
+              assert result.shape == (2, 5, 2)
+              assert torch.isfinite(result).all()
+              (result**2).mean().backward()
+              assert all(p.grad is not None for p in model.parameters())
+              print(variant, nparams(model), info)
+          PY
+
+      - name: Train A/B/C concurrently on three separate RTX 4090 GPUs
+        shell: bash
+        run: |
+          set -euo pipefail
+          declare -a PIDS=()
+          declare -a VARIANTS=(A B C)
+          for i in 0 1 2; do
+            variant="${VARIANTS[$i]}"
+            "$DLS_ENV/bin/python" "$TMPDIR/d1_bc.py" \
+              --variant "$variant" --gpu "$i" --seed 42 --epochs 8 --batch-size 48 \
+              > "$DLS_DATA_ROOT/reports/d1/train-logs/$variant.log" 2>&1 &
+            PIDS+=("$!")
+          done
+          failed=0
+          for i in 0 1 2; do
+            variant="${VARIANTS[$i]}"
+            if wait "${PIDS[$i]}"; then
+              echo "PASS BC-$variant"
+              tail -25 "$DLS_DATA_ROOT/reports/d1/train-logs/$variant.log"
+            else
+              echo "FAIL BC-$variant"
+              tail -70 "$DLS_DATA_ROOT/reports/d1/train-logs/$variant.log"
+              failed=1
+            fi
+          done
+          test "$failed" -eq 0
+
+      - name: Evaluate all three models and deterministic expert with 4 CPU simulators
+        shell: bash
+        run: |
+          set -euo pipefail
+          declare -a PIDS=()
+          declare -a VARIANTS=(A B C expert)
+          for variant in "${VARIANTS[@]}"; do
+            "$DLS_ENV/bin/python" "$TMPDIR/d1_eval.py" --variant "$variant" --seed 42 \
+              > "$DLS_DATA_ROOT/reports/d1/eval-logs/$variant.log" 2>&1 &
+            PIDS+=("$!")
+          done
+          failed=0
+          for index in "${!PIDS[@]}"; do
+            variant="${VARIANTS[$index]}"
+            if wait "${PIDS[$index]}"; then
+              echo "PASS closed-loop-$variant"
+              tail -12 "$DLS_DATA_ROOT/reports/d1/eval-logs/$variant.log"
+            else
+              echo "FAIL closed-loop-$variant"
+              tail -60 "$DLS_DATA_ROOT/reports/d1/eval-logs/$variant.log"
+              failed=1
+            fi
+          done
+          test "$failed" -eq 0
+
+      - name: Consolidate strictly observational pilot statistics
+        shell: bash
+        run: |
+          set -euo pipefail
+          "$DLS_ENV/bin/python" - <<'PY'
+          import json
+          from pathlib import Path
+          root = Path("/mnt/datasets/lxb/dls/reports/d1")
+          data = json.loads((root/"collection-summary.json").read_text())
+          result = {"stage": "D1 single-training-seed BC pilot, not D2 or D3",
+                    "data": data,
+                    "models": {}}
+          for variant in ("A", "B", "C"):
+              tr = json.loads((root / f"train-{variant}-seed42.json").read_text())
+              ev = json.loads((root / f"closed-loop-{variant}-seed42.json").read_text())
+              result["models"][variant] = {
+                  "parameters": tr["num_params"],
+                  "best_teacher_forced_val_huber": tr["best_val_huber"],
+                  "train_wall_seconds": tr["wall_seconds"],
+                  "closed_loop": [{
+                      "density": p["density"], "success": p["success"],
+                      "collisions": p["collisions"], "out_of_road": p["out_of_road"],
+                      "timeout": p["timeout"],
+                      "mean_route_completion": p["mean_route_completion"],
+                  } for p in ev["results"]],
+              }
+          e = json.loads((root / "closed-loop-expert-seed42.json").read_text())
+          result["expert_reference"] = [{
+              "density": p["density"], "success": p["success"],
+              "collisions": p["collisions"], "out_of_road": p["out_of_road"],
+              "timeout": p["timeout"],
+              "mean_route_completion": p["mean_route_completion"],
+          } for p in e["results"]]
+          out = root / "d1-pilot-summary.json"
+          out.write_text(json.dumps(result, indent=2), encoding="utf-8")
+          print(json.dumps(result["models"], indent=2))
+          print("Expert:", json.dumps(result["expert_reference"]))
+          PY
+          {
+            echo "## D1 ABC pilot"
+            echo "- A/B/C each trained with the same dataset and optimization budget, one GPU each"
+            echo "- Three models and teacher assessed on common test seeds (pilot) 3000..3007"
+            echo "- Summary: \`$DLS_DATA_ROOT/reports/d1/d1-pilot-summary.json\`"
+            echo "- All checkpoints and TensorBoard data: \`$DLS_DATA_ROOT\`"
+            echo "- Not evidence of coordination: D1 is only BC + basic closed-loop capability"
+          } >> "$GITHUB_STEP_SUMMARY"
