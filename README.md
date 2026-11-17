@@ -1,6 +1,6 @@
 # Drive Like a Living System (DLS)
 
-**Current stage (2026-11-17): D0–D1 completed. D2h frozen-actor value-only regression succeeded: held-out Critic EV A=21.4%, B=16.2%, C=−15.5%; A/B only marginally beat a constant predictor, C did not. PyTorch 2.5.1 / Gymnasium 1.4.0 are installed; SB3, SB3-Contrib, TorchRL are NOT. Next: cached-data D2i matched history-on/off Critic diagnostic plus isolated official-framework compatibility smoke, then sufficiently budgeted PPO baseline. No causal communication evidence yet.**
+**Current stage (2026-11-17): D0–D1 completed; D2h critic-only regression proved some value learnability but C did not generalize; D2i-H equal-parameter history ON/OFF yielded no stable held-out improvement (0/3 met predefined criterion); official SB3-Contrib 2.6.0 RecurrentPPO completed a 16,384-frame 4-worker MetaDrive smoke in isolated overlay venv, but random LSTM still 0/12 on new scenes. D2j is continuing the official baseline to ~300k total frames. Original A/B/C models and core dls-p0 environment remain unchanged; no causal modular coordination evidence yet.**
 
 ## Research question
 
@@ -49,7 +49,10 @@ We **do not** prescribe driving-skill labels to internal units or assume that a 
 - Future: replicated closed-loop optimization and frozen-weight direct-message causal perturbations (D3).
 
 - [Official MetaDrive/SB3-Contrib/TorchRL comparison and D2h pre-registration](docs/research/2026-11-17-official-RL-stack-audit.md): standard RL infrastructure should be reused; SB3's LSTM baseline is not a drop-in replacement for custom A/B/C recurrent modules.
-- [D2i matched critic history ON/OFF pre-registration](docs/research/2026-11-17-D2i-critic-history-control-plan.md): reuses all D2h rollouts, tests whether 64-step recurrent history improves value prediction at identical network capacity and optimization budget; not yet executed.
+- [D2i matched Critic history ON/OFF plan](docs/research/2026-11-17-D2i-critic-history-control-plan.md) and [confirmed null final result](docs/research/2026-11-17-D2i-history-critic-results.md): no training data recaptured; 3 model occupancies × exact same GRU parameters and fixed 50 epochs; 0/3 met 5% gain criterion. [Actions SUCCESS](https://github.com/Kryponitee/drive-like-a-living-system/actions/runs/44024937004).
+- [Official RecurrentPPO 16k smoke — SUCCESS](https://github.com/Kryponitee/drive-like-a-living-system/actions/runs/44024379218): four parallel MetaDrive workers + standardized RecurrentPPO pipeline; 0/12 arrivals after 16k frames, no convergence claim. [Technical result and dependency isolation](docs/research/2026-11-17-official-recurrentppo-smoke-results.md).
+- [D2j official RecurrentPPO 300k-frame continuation](https://github.com/Kryponitee/drive-like-a-living-system/actions/runs/44025266123): reuse previous checkpoint & VecNormalize; compare on fresh scenarios 5500..5523. Running as of this update; no completion or success claim.
+
 
 ## Previous records (retained for provenance)
 
