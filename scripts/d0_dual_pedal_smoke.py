@@ -38,10 +38,6 @@ def run_one(seed):
             "num_scenarios": 1,
             "horizon": 600,
             "log_level": 50,
-            "vehicle_config": {
-                "max_engine_force": 800,
-                "max_brake_force": 180,
-            },
         }
     )
     obs, reset_info = env.reset(seed=seed)
@@ -53,8 +49,7 @@ def run_one(seed):
     install_dual_pedal_adapter(vehicle, steering_controller=lambda _: 0.0)
     engine_max = float(vehicle.config["max_engine_force"])
     brake_max = float(vehicle.config["max_brake_force"])
-    assert np.isclose(engine_max, 800.0), engine_max
-    assert np.isclose(brake_max, 180.0), brake_max
+    assert engine_max > 0.0 and brake_max > 0.0, (engine_max, brake_max)
 
     def step(throttle, brake):
         action = np.asarray([throttle, brake], dtype=np.float32)
