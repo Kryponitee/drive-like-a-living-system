@@ -21,7 +21,17 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--variant", choices=("A", "B", "C", "expert"), required=True)
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--start-seed", type=int, default=3000)
+    parser.add_argument("--scene-count", type=int, default=8)
+    parser.add_argument("--density", type=float, choices=(0.0, 0.1, 0.25), default=None)
+    parser.add_argument("--tag", type=str, default="")
     args = parser.parse_args()
+    assert 3000 <= args.start_seed < 4000
+    assert 1 <= args.scene_count <= 100
+    assert args.start_seed + args.scene_count <= 4000
+    assert all(ch.isalnum() or ch == "-" for ch in args.tag)
+    if not args.tag:
+        assert args.start_seed == 3000 and args.scene_count == 8 and args.density is None
     assert os.path.ismount("/mnt/datasets")
     torch.set_num_threads(1)
     model = None
@@ -43,21 +53,21 @@ def main():
     results = []
     started = time.monotonic()
     with torch.no_grad():
-        for density in (0.0, 0.1, 0.25):
+        for density in ((args.density,) if args.density is not None else (0.0, 0.1, 0.25)):
             env = MetaDriveEnv(
                 {
                     "use_render": False,
                     "image_observation": False,
                     "traffic_density": density,
                     "map": 3,
-                    "start_seed": 3000,
-                    "num_scenarios": 8,
+                    "start_seed": args.start_seed,
+                    "num_scenarios": args.scene_count,
                     "horizon": 800,
                     "log_level": 50,
                 }
             )
             episodes = []
-            for seed in range(3000, 3008):
+            for seed in range(args.start_seed, args.start_seed + args.scene_count):
                 obs, _ = env.reset(seed=seed)
                 state = model.initial_state(1, torch.device("cpu")) if model else None
                 last_info = {}
@@ -99,24 +109,28 @@ def main():
             }
             results.append(group)
             print(f"{args.variant}: traffic={density}: "
-                  f"success={group['success']}/8 collisions={group['collisions']}/8 "
-                  f"offroad={group['out_of_road']}/8 timeout={group['timeout']}/8 "
+                  f"success={group['success']}/{args.scene_count} collisions={group['collisions']}/{args.scene_count} "
+                  f"offroad={group['out_of_road']}/{args.scene_count} timeout={group['timeout']}/{args.scene_count} "
                   f"completion={group['mean_route_completion']:.3f}", flush=True)
 
     report = {
         "stage": "D1 first CLOSED-LOOP pilot; do not infer motor synergy",
         "variant": args.variant,
         "seed": args.seed if model else None,
-        "evaluated_seeds": list(range(3000, 3008)),
-        "test_seeds_3010_onward_not_used": True,
-        "densities": [0.0, 0.1, 0.25],
+        "evaluated_seeds": list(range(args.start_seed, args.start_seed + args.scene_count)),
+        "evaluation_tag": args.tag or "pilot",
+        "densities": [args.density] if args.density is not None else [0.0, 0.1, 0.25],
         "horizon": 800,
         "map": 3,
         "teacher_action_sampling": "deterministic" if not model else None,
         "wall_seconds": time.monotonic() - started,
         "results": results,
     }
-    output = DATA_ROOT / "reports" / "d1" / f"closed-loop-{args.variant}-seed{args.seed}.json"
+    filename = (
+        f"closed-loop-{args.tag}-{args.variant}-seed{args.seed}-density{args.density:.2f}.json"
+        if args.tag else f"closed-loop-{args.variant}-seed{args.seed}.json"
+    )
+    output = DATA_ROOT / "reports" / "d1" / filename
     assert not output.exists(), "Do not overwrite previous closed-loop pilot"
     output.write_text(json.dumps(report, indent=2), encoding="utf-8")
     print(f"Saved {output}", flush=True)
