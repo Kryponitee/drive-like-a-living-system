@@ -1,0 +1,94 @@
+name: DLS D2k 4-to-32-worker MetaDrive sampler benchmark
+
+on:
+  push:
+    paths:
+      - .github/workflows/d2k-worker-scaling.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: dls-d2k-sampler-scaling
+  cancel-in-progress: false
+
+jobs:
+  cpu_scaling:
+    runs-on: [self-hosted, Linux, X64]
+    timeout-minutes: 45
+    env:
+      DLS_DATA_ROOT: /mnt/datasets/lxb/dls
+      SB3_VENV: /home/ps/miniconda3/envs/dls-sb3-compat
+      TMPDIR: /mnt/datasets/lxb/dls/tmp
+      XDG_CACHE_HOME: /mnt/datasets/lxb/dls/cache/xdg
+      PYTHONNOUSERSITE: "1"
+      OMP_NUM_THREADS: "1"
+      OPENBLAS_NUM_THREADS: "1"
+      MKL_NUM_THREADS: "1"
+      NUMEXPR_NUM_THREADS: "1"
+    steps:
+      - name: Verify original official 300k model and sufficient CPU and data-disk memory
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(findmnt -n -o TARGET -T "$DLS_DATA_ROOT")" = "/mnt/datasets"
+          test "$(findmnt -n -o TARGET -T "$SB3_VENV")" = "/"
+          test -f "$DLS_DATA_ROOT/reports/d2j/official-ppo-300k.json"
+          test -f "$DLS_DATA_ROOT/checkpoints/d2j/official-recurrentppo-300k.zip"
+          test -f "$DLS_DATA_ROOT/checkpoints/d2j/official-recurrentppo-vecnormalize-300k.pkl"
+          test "$(nproc --all)" -ge 32
+          test "$(df -Pk "$DLS_DATA_ROOT" | awk 'NR==2 {print $4}')" -gt 10485760
+          mkdir -p "$TMPDIR" "$DLS_DATA_ROOT/reports/d2k"
+          test ! -e "$DLS_DATA_ROOT/reports/d2k/worker-scaling-summary.json"
+          "$SB3_VENV/bin/python" - <<'PY'
+          import json, psutil, torch, stable_baselines3, sb3_contrib
+          from pathlib import Path
+          assert stable_baselines3.__version__ == sb3_contrib.__version__ == "2.6.0"
+          assert torch.__version__.startswith("2.5.1")
+          assert psutil.virtual_memory().available > 12 * 1024**3, "At least 12GB free system RAM required for 32 independent simulators"
+          r = json.loads(Path("/mnt/datasets/lxb/dls/reports/d2j/official-ppo-300k.json").read_text())
+          assert r["target_frames"] == 300032
+          print("CPUs:", psutil.cpu_count(logical=True), "available RAM GiB:", round(psutil.virtual_memory().available/(1024**3),1))
+          PY
+
+      - name: Fetch single versioned benchmark script without installing packages
+        shell: bash
+        run: |
+          set -euo pipefail
+          RAW="https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/${GITHUB_SHA}/scripts/d2k_worker_scaling.py"
+          GOT=0
+          for URL in "https://gh-proxy.com/$RAW" "https://ghproxy.net/$RAW" "$RAW"; do
+            if curl -fLsS --connect-timeout 10 --max-time 60 "$URL" -o "$TMPDIR/d2k_worker_scaling.py"; then
+              GOT=1
+              break
+            fi
+          done
+          test "$GOT" = 1
+          "$SB3_VENV/bin/python" -m py_compile "$TMPDIR/d2k_worker_scaling.py"
+          sha256sum "$TMPDIR/d2k_worker_scaling.py"
+
+      - name: Measure 4 8 16 and 32 CPU simulator workers sequentially using frozen LSTM policy
+        shell: bash
+        run: |
+          set -euo pipefail
+          "$SB3_VENV/bin/python" "$TMPDIR/d2k_worker_scaling.py"
+          test -s "$DLS_DATA_ROOT/reports/d2k/worker-scaling-summary.json"
+          "$SB3_VENV/bin/python" - <<'PY'
+          import json
+          from pathlib import Path
+          r=json.loads(Path("/mnt/datasets/lxb/dls/reports/d2k/worker-scaling-summary.json").read_text())
+          assert r["worker_counts_tested"] == [4,8,16,32]
+          assert all(x["total_measured_env_steps"]==8192 for x in r["results"])
+          assert all(x["new_training_updates"]==0 for x in r["results"])
+          print("Worker scaling:", [(x["workers"],round(x["aggregate_steps_per_second"],1)) for x in r["results"]])
+          print("Best stable candidate:",r["selected_workers_within_10pct_of_fastest"],
+                "speedup vs four workers:",round(r["speedup_vs_4"],2))
+          PY
+          {
+            echo "## D2k worker scaling"
+            echo "- 4/8/16/32 sequential CPU worker settings, exactly 8192 MetaDrive steps each"
+            echo "- Same frozen official RecurrentPPO model + frozen VecNormalize"
+            echo "- No training; comparison is inference+environment sampling throughput only"
+            echo "- Raw timings, memory and best candidate: \`$DLS_DATA_ROOT/reports/d2k/worker-scaling-summary.json\`"
+          } >> "$GITHUB_STEP_SUMMARY"
