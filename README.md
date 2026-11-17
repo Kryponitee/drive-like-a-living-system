@@ -1,6 +1,6 @@
 # Drive Like a Living System (DLS)
 
-**Current stage (2026-11-17): D0–D1 done; D2a PPO mechanics passed; D2b–D2c isolated excessive steering exploration; D2d low-noise PPO recovers some training successes but does not outperform BC; D2e found reduced closed-loop reward and degraded expert imitation after PPO. Next: single-factor BC-anchored PPO (D2f). No causal module coordination evidence yet.**
+**Current stage (2026-11-17): D0–D1 completed; D2a–D2e diagnosed PPO exploration and policy drift; D2f frozen-BC action anchoring significantly reduced imitation drift, but produced mixed closed-loop rewards/success (B improved, A/C did not consistently). Next: critic value/advantage diagnostic. No causal module coordination evidence yet.**
 
 ## Research question
 
@@ -39,7 +39,10 @@ We **do not** prescribe driving-skill labels to internal units or assume that a 
 - D2c: [frozen BC noise intervention — completed](https://github.com/Kryponitee/drive-like-a-living-system/actions/runs/44012974852): at density 0.10 success A/B/C collapsed from 16/18/18 of 24 when deterministic to 1/1/1 at pre-tanh exploration sigma=0.27.
 - D2d: [one-factor sigma=0.05 PPO correction — SUCCESS](https://github.com/Kryponitee/drive-like-a-living-system/actions/runs/44013255699); training successes A/B/C changed from 0/0/3 to 3/4/3, but final driving did not improve beyond BC.
 - D2e: [read-only reward/imitation audit — SUCCESS](https://github.com/Kryponitee/drive-like-a-living-system/actions/runs/44014040894); at traffic density 0.10 PPO reduced both episodic reward and success while increasing BC validation imitation error.
-- Next hypothesis: add one BC functional anchoring term during low-noise recurrent PPO to test whether pretrained motor skill can be preserved while acquiring closed-loop improvements; this has NOT yet been tested.
+- D2f: [BC functional anchor PPO run](https://github.com/Kryponitee/drive-like-a-living-system/actions/runs/44015006851): training, paired evaluations and validation passed; only last aggregate step failed due incorrect top-level seed metadata.
+- [D2f audit-only corrected aggregate — SUCCESS](https://github.com/Kryponitee/drive-like-a-living-system/actions/runs/44016058139): validates 30 completed original per-episode scene IDs, preserving untouched raw results. No reruns.
+- [D2f result and interpretation](docs/research/2026-11-17-D2f-BC-functional-anchor-results.md): validation Huber improved A/B/C, but new-scene closed-loop benefit arose only in B, not consistently across models.
+- Next: frozen-policy critic/advantage quality audit before spending more PPO training budget.
 - [D2 protocol and correctness record](docs/research/2026-11-17-D2a-D2b-recurrent-PPO.md).
 - Future: replicated closed-loop optimization and frozen-weight direct-message causal perturbations (D3).
 
