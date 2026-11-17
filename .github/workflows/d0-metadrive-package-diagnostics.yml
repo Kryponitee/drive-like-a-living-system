@@ -1,0 +1,37 @@
+name: DLS D0 MetaDrive package diagnostics
+
+on:
+  push:
+    paths:
+      - .github/workflows/d0-metadrive-package-diagnostics.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  inspect:
+    runs-on: [self-hosted, Linux, X64]
+    timeout-minutes: 15
+    env:
+      DATA_ROOT: /mnt/datasets/lxb/dls
+      ENV_PYTHON: /home/ps/miniconda3/envs/dls-p0/bin/python
+      PIP_CACHE_DIR: /mnt/datasets/lxb/dls/cache/pip
+      TMPDIR: /mnt/datasets/lxb/dls/tmp
+    steps:
+      - name: Probe package and asset availability without installing
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(findmnt -n -o TARGET -T "$DATA_ROOT")" = "/mnt/datasets"
+          test -x "$ENV_PYTHON"
+          mkdir -p "$PIP_CACHE_DIR" "$TMPDIR" "$DATA_ROOT/reports/d0"
+          "$ENV_PYTHON" --version
+          echo "=== pip mirror and MetaDrive versions ==="
+          "$ENV_PYTHON" -m pip index versions metadrive-simulator | head -12
+          echo "=== probe PyPI metadata without saving package ==="
+          "$ENV_PYTHON" -m pip index versions panda3d | head -5
+          echo "=== MetaDrive assets at system prefix ==="
+          ls -ld /home/ps/miniconda3/envs/dls-p0/lib/python3.10/site-packages/metadrive/assets /mnt/datasets/lxb/dls/metadrive_assets 2>/dev/null || true
+          echo "=== root and data remaining ==="
+          df -h /home/ps/miniconda3/envs/dls-p0 "$DATA_ROOT"
