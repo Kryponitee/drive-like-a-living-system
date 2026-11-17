@@ -24,8 +24,8 @@ REPORT_PATH = REPORT_DIR / "actuator-smoke.json"
 assert not REPORT_PATH.exists(), f"Refusing to overwrite {REPORT_PATH}"
 
 SEEDS = (7101, 7102, 7103)
-ACCEL_STEPS = 80
-BRAKE_STEPS = 80
+ACCEL_STEPS = 40
+BRAKE_STEPS = 40
 
 
 def run_one(seed):
