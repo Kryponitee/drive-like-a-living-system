@@ -1,0 +1,48 @@
+name: DLS D0b expert horizon control
+
+on:
+  push:
+    paths:
+      - .github/workflows/d0-expert-horizon.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  expert-horizon:
+    runs-on: [self-hosted, Linux, X64]
+    timeout-minutes: 25
+    env:
+      DLS_DATA_ROOT: /mnt/datasets/lxb/dls
+      DLS_D0_MAX_STEPS: "800"
+      PYTHONNOUSERSITE: "1"
+      XDG_CACHE_HOME: /mnt/datasets/lxb/dls/cache/xdg
+      TMPDIR: /mnt/datasets/lxb/dls/tmp
+    steps:
+      - name: Verify installed environment, disk and scenario configuration
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(findmnt -n -o TARGET -T "$DLS_DATA_ROOT")" = "/mnt/datasets"
+          test -f "$DLS_DATA_ROOT/metadrive_assets/version.txt"
+          test -x /home/ps/miniconda3/envs/dls-p0/bin/python
+          test -f "$DLS_DATA_ROOT/reports/d0/expert_audit.json"
+          mkdir -p "$TMPDIR" "$DLS_DATA_ROOT/reports/d0" "$DLS_DATA_ROOT/demonstrations"
+
+      - name: Audit the same 12 expert scenes with 800-step horizon
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl -fsSL --connect-timeout 10 --max-time 90 \
+            "https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/${GITHUB_SHA}/scripts/d0_expert_audit.py" -o "$TMPDIR/d0_expert_audit_h800.py"
+          /home/ps/miniconda3/envs/dls-p0/bin/python "$TMPDIR/d0_expert_audit_h800.py"
+          test -f "$DLS_DATA_ROOT/reports/d0/expert_audit_h800.json"
+          test -f "$DLS_DATA_ROOT/demonstrations/d0-expert-probe-h800.npz"
+          {
+            echo "## D0b: expert horizon diagnostic"
+            echo "- Only changed max episode steps: 400 -> 800"
+            echo "- Same 12 scenario seeds and deterministic expert"
+            echo "- Report: \`$DLS_DATA_ROOT/reports/d0/expert_audit_h800.json\`"
+            echo "- Samples: \`$DLS_DATA_ROOT/demonstrations/d0-expert-probe-h800.npz\`"
+          } >> "$GITHUB_STEP_SUMMARY"
