@@ -65,10 +65,29 @@ jobs:
             test ! -e "$ASSET_DIR"
             test ! -e "$UNPACK"
             if test ! -f "$ASSET_ZIP"; then
-              curl -fL --retry 4 --retry-delay 3 --connect-timeout 15 --max-time 900 \
-                "https://github.com/metadriverse/metadrive/releases/download/MetaDrive-0.4.3/assets.zip" -o "$ASSET_ZIP.part"
-              mv "$ASSET_ZIP.part" "$ASSET_ZIP"
+              OFFICIAL="https://github.com/metadriverse/metadrive/releases/download/MetaDrive-0.4.3/assets.zip"
+              expected_bytes=134074203
+              downloaded=0
+              for url in \
+                "$OFFICIAL" \
+                "https://gh-proxy.com/$OFFICIAL" \
+                "https://ghproxy.net/$OFFICIAL"; do
+                echo "Trying MetaDrive 0.4.3 assets from: $url"
+                rm -f -- "$ASSET_ZIP.part"
+                if curl -fL --retry 1 --retry-delay 2 --connect-timeout 12 --max-time 180 "$url" -o "$ASSET_ZIP.part"; then
+                  actual_bytes="$(stat -c %s "$ASSET_ZIP.part")"
+                  if test "$actual_bytes" = "$expected_bytes" && unzip -tqq "$ASSET_ZIP.part"; then
+                    mv "$ASSET_ZIP.part" "$ASSET_ZIP"
+                    echo "$url" > "$DLS_DATA_ROOT/reports/d0/metadrive-assets-origin.txt"
+                    downloaded=1
+                    break
+                  fi
+                  echo "Invalid size/ZIP: expected $expected_bytes bytes, received $actual_bytes"
+                fi
+              done
+              test "$downloaded" = 1
             fi
+            test "$(stat -c %s "$ASSET_ZIP")" = 134074203
             unzip -tqq "$ASSET_ZIP"
             mkdir -p "$UNPACK"
             unzip -q "$ASSET_ZIP" -d "$UNPACK"
