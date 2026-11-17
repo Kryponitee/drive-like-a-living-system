@@ -1,0 +1,202 @@
+name: DLS D2h official-audited value-only diagnostic
+
+on:
+  push:
+    paths:
+      - .github/workflows/d2h-critic-only.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: dls-d2h-frozen-actor-value
+  cancel-in-progress: false
+
+jobs:
+  critic_only:
+    runs-on: [self-hosted, Linux, X64]
+    timeout-minutes: 80
+    env:
+      DLS_DATA_ROOT: /mnt/datasets/lxb/dls
+      DLS_ENV: /home/ps/miniconda3/envs/dls-p0
+      TMPDIR: /mnt/datasets/lxb/dls/tmp
+      XDG_CACHE_HOME: /mnt/datasets/lxb/dls/cache/xdg
+      PYTHONNOUSERSITE: "1"
+      OMP_NUM_THREADS: "1"
+      MKL_NUM_THREADS: "1"
+      OPENBLAS_NUM_THREADS: "1"
+      NUMEXPR_NUM_THREADS: "1"
+    steps:
+      - name: Validate storage, frozen BC actors, old critics and GPU runtime
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(findmnt -n -o TARGET -T "$DLS_DATA_ROOT")" = "/mnt/datasets"
+          test "$(findmnt -n -o TARGET -T "$DLS_ENV")" = "/"
+          test -f "$DLS_DATA_ROOT/reports/d2g/d2g-summary.json"
+          for variant in A B C; do
+            test -f "$DLS_DATA_ROOT/checkpoints/d1-v1/$variant-seed42.pt"
+            test -f "$DLS_DATA_ROOT/checkpoints/d2f-v1/$variant-seed42.pt"
+          done
+          "$DLS_ENV/bin/python" -c 'import torch; assert torch.cuda.device_count() >= 3'
+          test "$(df -Pk "$DLS_DATA_ROOT" | awk 'NR==2 {print $4}')" -gt 10485760
+          mkdir -p "$TMPDIR" "$DLS_DATA_ROOT/rollouts/d2h-v1" "$DLS_DATA_ROOT/reports/d2h/logs" "$DLS_DATA_ROOT/checkpoints/d2h-v1"
+          df -h "$DLS_DATA_ROOT"
+
+      - name: Record installed official-framework availability without installing packages
+        shell: bash
+        run: |
+          set -euo pipefail
+          "$DLS_ENV/bin/python" - <<'PY'
+          import importlib.util, importlib.metadata as metadata, json
+          from pathlib import Path
+          packages = {
+              "stable_baselines3": "stable-baselines3",
+              "sb3_contrib": "sb3-contrib",
+              "torchrl": "torchrl",
+              "tensordict": "tensordict",
+              "gymnasium": "gymnasium",
+              "torch": "torch",
+              "metadrive": "metadrive-simulator",
+          }
+          result = {"stage": "D2h preflight installed official PPO components only; no installation", "packages": {}}
+          for mod, distribution in packages.items():
+              available = importlib.util.find_spec(mod) is not None
+              try:
+                  version = metadata.version(distribution)
+              except metadata.PackageNotFoundError:
+                  version = None
+              result["packages"][distribution] = {"import_spec_exists": available, "version": version}
+          out=Path("/mnt/datasets/lxb/dls/reports/d2h/official-stack-preflight.json")
+          out.write_text(json.dumps(result, indent=2))
+          print(json.dumps(result, indent=2))
+          PY
+
+      - name: Reuse exact original actor/critic modules and download only small D2h source
+        shell: bash
+        run: |
+          set -euo pipefail
+          for item in "src/dls_p0.py:dls_p0.py" \
+                      "src/dls_recurrent_ppo.py:dls_recurrent_ppo.py" \
+                      "scripts/d2h_collect_critic_returns.py:d2h_collect.py" \
+                      "scripts/d2h_train_critic_only.py:d2h_value.py"; do
+            SRC="${item%%:*}"
+            TARGET="${item#*:}"
+            RAW="https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/${GITHUB_SHA}/$SRC"
+            OK=0
+            for URL in "https://gh-proxy.com/$RAW" "https://ghproxy.net/$RAW" "$RAW"; do
+              if curl -fLsS --connect-timeout 10 --max-time 60 "$URL" -o "$TMPDIR/$TARGET"; then
+                OK=1
+                break
+              fi
+            done
+            test "$OK" -eq 1
+            "$DLS_ENV/bin/python" -m py_compile "$TMPDIR/$TARGET"
+            sha256sum "$TMPDIR/$TARGET"
+          done
+
+      - name: Collect six independent complete-episode datasets with frozen actors using six CPU processes
+        shell: bash
+        run: |
+          set -euo pipefail
+          declare -a PIDS=()
+          declare -a LABELS=()
+          for split in train validation; do
+            for variant in A B C; do
+              name="$split-$variant"
+              "$DLS_ENV/bin/python" "$TMPDIR/d2h_collect.py" \
+                --split "$split" --variant "$variant" \
+                > "$DLS_DATA_ROOT/reports/d2h/logs/collect-$name.log" 2>&1 &
+              PIDS+=("$!")
+              LABELS+=("$name")
+            done
+          done
+          test "${#PIDS[@]}" -eq 6
+          failure=0
+          for i in "${!PIDS[@]}"; do
+            if wait "${PIDS[$i]}"; then
+              echo "PASS collect ${LABELS[$i]}"
+              tail -2 "$DLS_DATA_ROOT/reports/d2h/logs/collect-${LABELS[$i]}.log"
+            else
+              echo "FAIL collect ${LABELS[$i]}"
+              tail -80 "$DLS_DATA_ROOT/reports/d2h/logs/collect-${LABELS[$i]}.log"
+              failure=1
+            fi
+          done
+          test "$failure" -eq 0
+
+      - name: Train three critic-only regressors on disjoint train scenes and evaluate held-out scenes
+        shell: bash
+        run: |
+          set -euo pipefail
+          declare -a PIDS=()
+          declare -a LABELS=(A B C)
+          for gpu in 0 1 2; do
+            variant="${LABELS[$gpu]}"
+            "$DLS_ENV/bin/python" "$TMPDIR/d2h_value.py" \
+              --variant "$variant" --gpu "$gpu" \
+              > "$DLS_DATA_ROOT/reports/d2h/logs/value-$variant.log" 2>&1 &
+            PIDS+=("$!")
+          done
+          failure=0
+          for i in "${!PIDS[@]}"; do
+            v="${LABELS[$i]}"
+            if wait "${PIDS[$i]}"; then
+              echo "PASS value-only $v"
+              tail -8 "$DLS_DATA_ROOT/reports/d2h/logs/value-$v.log"
+            else
+              echo "FAIL value-only $v"
+              tail -80 "$DLS_DATA_ROOT/reports/d2h/logs/value-$v.log"
+              failure=1
+            fi
+          done
+          test "$failure" -eq 0
+
+      - name: Consolidate actual sample counts and held-out value prediction improvement
+        shell: bash
+        run: |
+          set -euo pipefail
+          "$DLS_ENV/bin/python" - <<'PY'
+          import json
+          from pathlib import Path
+          root=Path("/mnt/datasets/lxb/dls/reports/d2h")
+          summary={"stage":"D2h frozen BC actor, supervised value-only diagnostic",
+                   "training_seeds":list(range(4600,4624)),
+                   "validation_seeds":list(range(4700,4716)),
+                   "no_actor_updates":True, "no_PPO_updates":True,
+                   "source":"3x24/16 frozen-BC complete-episode datasets, uncensored labels only",
+                   "framework_stack_availability":json.loads((root/"official-stack-preflight.json").read_text()),
+                   "models":{}}
+          for v in "ABC":
+              row=json.loads((root/f"critic-{v}-seed42.json").read_text())
+              assert row["train_scene_seeds"]==list(range(4600,4624))
+              assert row["validation_scene_seeds"]==list(range(4700,4716))
+              baseline=row["old_validation"]
+              trained=row["new_validation"]
+              summary["models"][v]={
+                  "train_valid_steps":row["train_valid_steps"],
+                  "validation_valid_steps":row["validation_valid_steps"],
+                  "old_critic_ev":baseline["explained_variance"],
+                  "new_critic_ev":trained["explained_variance"],
+                  "old_critic_RMSE":baseline["RMSE"],
+                  "new_critic_RMSE":trained["RMSE"],
+                  "constant_train_mean_RMSE":trained["constant_train_mean_RMSE"],
+                  "old_critic_Pearson":baseline["pearson"],
+                  "new_critic_Pearson":trained["pearson"],
+                  "actor_parameters_changed":False,
+              }
+              print(v,summary["models"][v])
+          path=root/"d2h-summary.json"
+          assert not path.exists()
+          path.write_text(json.dumps(summary,indent=2))
+          print("Saved:",path)
+          PY
+          {
+            echo "## D2h value-only gate"
+            echo "- Frozen original BC actor; three train/validation disjoint sceneseed pairs"
+            echo "- No actor/PPO updates, no new dependencies installed"
+            echo "- Original D2f Critic vs fitted value Critic vs constant predictor"
+            echo "- Full results on data disk: \`$DLS_DATA_ROOT/reports/d2h/d2h-summary.json\`"
+            echo "- Official package availability recorded before selecting RL infrastructure"
+          } >> "$GITHUB_STEP_SUMMARY"
