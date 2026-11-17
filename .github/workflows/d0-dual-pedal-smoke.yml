@@ -4,6 +4,8 @@ on:
   push:
     paths:
       - .github/workflows/d0-dual-pedal-smoke.yml
+      - src/dls_dual_pedal_adapter.py
+      - scripts/d0_dual_pedal_smoke.py
   workflow_dispatch:
 
 permissions:
