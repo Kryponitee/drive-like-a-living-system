@@ -1,0 +1,208 @@
+name: DLS D2d reduced-noise recurrent PPO causal fix test
+
+on:
+  push:
+    paths:
+      - .github/workflows/d2d-low-sigma-ppo.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: dls-d2d-low-sigma
+  cancel-in-progress: false
+
+jobs:
+  train_and_evaluate:
+    runs-on: [self-hosted, Linux, X64]
+    timeout-minutes: 80
+    env:
+      DLS_DATA_ROOT: /mnt/datasets/lxb/dls
+      DLS_ENV: /home/ps/miniconda3/envs/dls-p0
+      TMPDIR: /mnt/datasets/lxb/dls/tmp
+      XDG_CACHE_HOME: /mnt/datasets/lxb/dls/cache/xdg
+      PYTHONNOUSERSITE: "1"
+      OMP_NUM_THREADS: "1"
+      OPENBLAS_NUM_THREADS: "1"
+      MKL_NUM_THREADS: "1"
+      NUMEXPR_NUM_THREADS: "1"
+      DLS_D2_TRAINING: "1"
+    steps:
+      - name: Verify original D2b and D2c noise result, and immutable checkpoints
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(findmnt -n -o TARGET -T "$DLS_DATA_ROOT")" = "/mnt/datasets"
+          test "$(findmnt -n -o TARGET -T "$DLS_ENV")" = "/"
+          test -f "$DLS_DATA_ROOT/reports/d2b/d2b-summary.json"
+          test -f "$DLS_DATA_ROOT/reports/d2c/d2c-summary.json"
+          "$DLS_ENV/bin/python" -c 'import torch; assert torch.cuda.device_count() >= 3'
+          for v in A B C; do
+            test -f "$DLS_DATA_ROOT/checkpoints/d1-v1/$v-seed42.pt"
+            test -f "$DLS_DATA_ROOT/checkpoints/d2b-v1/$v-seed42.pt"
+          done
+          test "$(df -Pk "$DLS_DATA_ROOT" | awk 'NR==2 {print $4}')" -gt 10485760
+          mkdir -p "$TMPDIR" "$DLS_DATA_ROOT/reports/d2d/train-logs" "$DLS_DATA_ROOT/reports/d2d/eval-logs" "$DLS_DATA_ROOT/checkpoints/d2d-v1"
+
+      - name: Download exact version of original policy and one-factor modified train/eval
+        shell: bash
+        run: |
+          set -euo pipefail
+          for item in "src/dls_p0.py:dls_p0.py" \
+                      "src/dls_recurrent_ppo.py:dls_recurrent_ppo.py" \
+                      "scripts/d2d_train_low_sigma.py:d2d_train.py" \
+                      "scripts/d2d_eval.py:d2d_eval.py"; do
+            SRC="${item%%:*}"
+            TARGET="${item#*:}"
+            RAW="https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/${GITHUB_SHA}/$SRC"
+            OK=0
+            for URL in "https://gh-proxy.com/$RAW" "https://ghproxy.net/$RAW" "$RAW"; do
+              if curl -fLsS --connect-timeout 10 --max-time 60 "$URL" -o "$TMPDIR/$TARGET"; then
+                OK=1
+                break
+              fi
+            done
+            test "$OK" -eq 1
+            "$DLS_ENV/bin/python" -m py_compile "$TMPDIR/$TARGET"
+            sha256sum "$TMPDIR/$TARGET"
+          done
+
+      - name: Train three BC-initialized low-noise models on same 4096-step budget and 3 GPUs
+        shell: bash
+        run: |
+          set -euo pipefail
+          declare -a PIDS=()
+          declare -a VARIANTS=(A B C)
+          for gpu in 0 1 2; do
+            variant="${VARIANTS[$gpu]}"
+            "$DLS_ENV/bin/python" "$TMPDIR/d2d_train.py" \
+              --variant "$variant" --model-seed 42 --gpu "$gpu" \
+              --env-steps 4096 --rollout 128 \
+              > "$DLS_DATA_ROOT/reports/d2d/train-logs/$variant.log" 2>&1 &
+            PIDS+=("$!")
+          done
+          bad=0
+          for i in "${!PIDS[@]}"; do
+            v="${VARIANTS[$i]}"
+            if wait "${PIDS[$i]}"; then
+              echo "PASS train $v"
+              tail -23 "$DLS_DATA_ROOT/reports/d2d/train-logs/$v.log"
+            else
+              echo "FAIL train $v"
+              tail -75 "$DLS_DATA_ROOT/reports/d2d/train-logs/$v.log"
+              bad=1
+            fi
+          done
+          test "$bad" -eq 0
+
+      - name: Four-phase matched evaluation on untouched scenes 4300-4311 in 30 CPU processes
+        shell: bash
+        run: |
+          set -euo pipefail
+          declare -a PIDS=()
+          declare -a LABELS=()
+          for phase in bc d2b d2d expert; do
+            if test "$phase" = expert; then
+              VARIANTS=(expert)
+            else
+              VARIANTS=(A B C)
+            fi
+            for variant in "${VARIANTS[@]}"; do
+              for density in 0.00 0.10 0.25; do
+                label="$phase-$variant-density$density"
+                "$DLS_ENV/bin/python" "$TMPDIR/d2d_eval.py" \
+                  --phase "$phase" --variant "$variant" --density "$density" \
+                  > "$DLS_DATA_ROOT/reports/d2d/eval-logs/$label.log" 2>&1 &
+                PIDS+=("$!")
+                LABELS+=("$label")
+              done
+            done
+          done
+          test "${#PIDS[@]}" = 30
+          bad=0
+          for i in "${!PIDS[@]}"; do
+            if wait "${PIDS[$i]}"; then
+              echo "PASS eval ${LABELS[$i]}"
+              grep 'success=' "$DLS_DATA_ROOT/reports/d2d/eval-logs/${LABELS[$i]}.log" | tail -1
+            else
+              echo "FAIL eval ${LABELS[$i]}"
+              tail -60 "$DLS_DATA_ROOT/reports/d2d/eval-logs/${LABELS[$i]}.log"
+              bad=1
+            fi
+          done
+          test "$bad" -eq 0
+
+      - name: Report success, collision and coverage by phase and density with paired scenario IDs
+        shell: bash
+        run: |
+          set -euo pipefail
+          "$DLS_ENV/bin/python" - <<'PY'
+          import json
+          from pathlib import Path
+          root=Path("/mnt/datasets/lxb/dls/reports/d2d")
+          model_seeds=(42,)
+          densities=(0.0,0.1,0.25)
+          phases=("bc","d2b","d2d")
+          result={"stage":"D2d only exploration scale changed, same 4096-step PPO",
+                  "sigma_original":0.272531793,"sigma_corrected":0.05,
+                  "training_model_seed":42, "training_scenario_start_seed":4000,
+                  "evaluation_scenario_seeds":list(range(4300,4312)),
+                  "training_budget_steps_per_model":4096,
+                  "models":{}, "expert":{}}
+          def load(phase, v, density):
+              p=root/f"eval-{phase}-{v}-density{density:.2f}.json"
+              o=json.loads(p.read_text())
+              assert o["seeds"] == list(range(4300,4312))
+              assert o["traffic_density"] == density
+              assert len(o["episodes"]) == 12
+              return o
+          for v in "ABC":
+              train=json.loads((root/f"train-{v}-seed42.json").read_text())
+              assert train["environment_steps"]==4096
+              assert train["initial_exploration_sigma"]==0.05
+              assert train["max_ppo_behavior_replay_error"]<3e-5
+              group={"training":{
+                  "successful_episodes":train["num_successful_completed_training_episodes"],
+                  "training_seeds":[train["training_seed_first"], train["training_seed_last"]],
+                  "max_ratio_error":train["max_ppo_behavior_replay_error"],
+                  "mean_approx_kl":train["mean_approx_kl_last_epoch"],
+                  "actor_param_count":train["actor_param_count"],
+                  "policy_param_count":train["policy_param_count"]
+              }, "by_density":{}}
+              for density in densities:
+                  data={p:load(p,v,density) for p in phases}
+                  summary={p:{"success":o["success"],"collision":o["collision"],
+                              "offroad":o["offroad"],"mean_completion":o["mean_completion"]}
+                           for p,o in data.items()}
+                  for phase in ("d2b","d2d"):
+                      base=data["bc"]["episodes"]
+                      after=data[phase]["episodes"]
+                      assert [x["seed"] for x in base] == [x["seed"] for x in after]
+                      summary[phase]["net_success_vs_BC"]=sum(int(y["success"])-int(x["success"]) for x,y in zip(base,after))
+                  group["by_density"][str(density)]=summary
+              result["models"][v]=group
+          assert result["models"]["B"]["training"]["policy_param_count"]==result["models"]["C"]["training"]["policy_param_count"]
+          for density in densities:
+              expert=load("expert","expert",density)
+              result["expert"][str(density)]={"success":expert["success"],
+                                             "collision":expert["collision"],
+                                             "offroad":expert["offroad"]}
+          out=root/"d2d-summary.json"
+          assert not out.exists()
+          out.write_text(json.dumps(result,ensure_ascii=False,indent=2),encoding="utf-8")
+          for v in "ABC":
+              group=result["models"][v]
+              print(v,"training successes:",group["training"]["successful_episodes"])
+              for density,row in group["by_density"].items():
+                  print(v,density,"BC/old PPO/low sigma PPO:",
+                        row["bc"]["success"],row["d2b"]["success"],row["d2d"]["success"])
+          PY
+          {
+            echo "## D2d corrected exploration PPO"
+            echo "- 3 GPU trainings x 4096 simulation steps, no new BC demonstration collection"
+            echo "- Only initial sigma changed to 0.05, clamp updated to keep it admissible"
+            echo "- Before BC / old PPO / corrected PPO / expert tested on identical unused scenes"
+            echo "- Summary: \`$DLS_DATA_ROOT/reports/d2d/d2d-summary.json\`"
+            echo "- Model and experiment logs remain on data disk"
+          } >> "$GITHUB_STEP_SUMMARY"
