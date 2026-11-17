@@ -33,9 +33,18 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          curl -fsSL --connect-timeout 10 --max-time 90 \
-            "https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/${GITHUB_SHA}/scripts/d0_interaction_exposure.py" \
-            -o "$TMPDIR/d0_interaction_exposure.py"
+          SRC="https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/${GITHUB_SHA}/scripts/d0_interaction_exposure.py"
+          DOWNLOADED=0
+          for URL in "https://gh-proxy.com/$SRC" "https://ghproxy.net/$SRC" "$SRC"; do
+            echo "Fetching D0d script from ${URL%%/*}"
+            if curl -fLsS --connect-timeout 8 --max-time 40 "$URL" -o "$TMPDIR/d0_interaction_exposure.py" &&
+              grep -q "def physical_context" "$TMPDIR/d0_interaction_exposure.py"; then
+              DOWNLOADED=1
+              break
+            fi
+          done
+          test "$DOWNLOADED" = 1
+          "$DLS_ENV/bin/python" -m py_compile "$TMPDIR/d0_interaction_exposure.py"
           "$DLS_ENV/bin/python" "$TMPDIR/d0_interaction_exposure.py"
           test -f "$DLS_DATA_ROOT/reports/d0/expert_interaction_exposure.json"
           {
