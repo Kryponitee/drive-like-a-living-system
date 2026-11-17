@@ -1,0 +1,184 @@
+name: DLS D5a train redundant motor units and test single-unit lesion robustness
+
+on:
+  push:
+    paths:
+      - .github/workflows/d5a-redundant-motor-robustness.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: dls-d5a-redundant-motor-robustness
+  cancel-in-progress: false
+
+jobs:
+  learn-and-lesion:
+    runs-on: [self-hosted, Linux, X64]
+    timeout-minutes: 180
+    env:
+      DLS_DATA_ROOT: /mnt/datasets/lxb/dls
+      DLS_ENV: /home/ps/miniconda3/envs/dls-p0
+      TMPDIR: /mnt/datasets/lxb/dls/tmp
+      XDG_CACHE_HOME: /mnt/datasets/lxb/dls/cache/xdg
+      PYTHONNOUSERSITE: "1"
+      OMP_NUM_THREADS: "1"
+      OPENBLAS_NUM_THREADS: "1"
+      MKL_NUM_THREADS: "1"
+      NUMEXPR_NUM_THREADS: "1"
+      DLS_D5A_TRAINING: "1"
+    steps:
+      - name: Validate old D1 expert data and original C checkpoints without overwrite
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(findmnt -n -o TARGET -T "$DLS_DATA_ROOT")" = "/mnt/datasets"
+          test -s "$DLS_DATA_ROOT/demonstrations/d1-v1/train/worker-00-density-0.00.npz"
+          test -s "$DLS_DATA_ROOT/reports/d4a/d4a-summary.json"
+          "$DLS_ENV/bin/python" -c "import torch; assert torch.cuda.device_count() >= 3"
+          mkdir -p "$TMPDIR" "$DLS_DATA_ROOT/reports/d5a/logs"
+          for seed in 42 43 44; do
+            test -s "$DLS_DATA_ROOT/checkpoints/d1-v1/C-seed$seed.pt"
+            for arm in clean robust; do
+              test ! -e "$DLS_DATA_ROOT/checkpoints/d5a/$arm-seed$seed.pt"
+              test ! -e "$DLS_DATA_ROOT/reports/d5a/train-$arm-seed$seed.json"
+            done
+          done
+          test ! -e "$DLS_DATA_ROOT/reports/d5a/d5a-summary.json"
+          test ! -e "$DLS_DATA_ROOT/reports/d5a/eval/clean-seed42-density0.00-shard0.json"
+          sha256sum "$DLS_DATA_ROOT/checkpoints/d1-v1/"C-seed{42,43,44}.pt > "$DLS_DATA_ROOT/reports/d5a/original-C-sha256-before.txt"
+          df -h "$DLS_DATA_ROOT"
+
+      - name: Fetch pinned reusable source and smoke-test motor mapping
+        shell: bash
+        run: |
+          set -euo pipefail
+          for item in "src/dls_p0.py:dls_p0.py" \
+                      "src/dls_motor_redundancy.py:dls_motor_redundancy.py" \
+                      "scripts/d1_bc.py:d1_bc.py" \
+                      "scripts/d5a_train_redundant_motor.py:d5a_train_redundant_motor.py" \
+                      "scripts/d5a_eval_redundant_motor.py:d5a_eval_redundant_motor.py" \
+                      "scripts/d5a_aggregate_results.py:d5a_aggregate_results.py"; do
+            SRC="${item%%:*}"
+            NAME="${item#*:}"
+            RAW="https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/${GITHUB_SHA}/$SRC"
+            OK=0
+            for URL in "https://gh-proxy.com/$RAW" "https://ghproxy.net/$RAW" "$RAW"; do
+              if curl -fLsS --connect-timeout 10 --max-time 60 "$URL" -o "$TMPDIR/$NAME"; then
+                OK=1
+                break
+              fi
+            done
+            test "$OK" = 1
+            "$DLS_ENV/bin/python" -m py_compile "$TMPDIR/$NAME"
+          done
+          "$DLS_ENV/bin/python" - <<'PY'
+          import sys,os,torch
+          sys.path.insert(0, os.environ["TMPDIR"])
+          from dls_motor_redundancy import RedundantMotorController,motor_params,run_motor_sequence
+          from d5a_train_redundant_motor import sample_unit_masks
+          from dls_p0 import model_info,nparams
+          m=RedundantMotorController()
+          assert motor_params(m)==115568
+          assert nparams(model_info("C")[0])==114390
+          assert torch.linalg.matrix_rank(m.decoder)==2
+          x=torch.randn(2,4,259)
+          healthy=run_motor_sequence(m,x)
+          assert healthy.shape==(2,4,2)
+          assert torch.allclose(healthy,run_motor_sequence(m,x,torch.ones(2,8)))
+          mask=torch.ones(2,8);mask[:,0]=0
+          damaged=run_motor_sequence(m,x,mask)
+          assert damaged.shape==healthy.shape
+          assert not torch.allclose(healthy,damaged)
+          masks=sample_unit_masks(1000,torch.device("cpu"))
+          assert ((masks.sum(-1)>=6)&(masks.sum(-1)<=8)).all()
+          healthy.sum().backward()
+          assert torch.isfinite(m.decoder.grad).all()
+          print("D5a preflight passed: 8 learned motor units, 2 absolute control outputs, 115568 params, 8-to-2 mapping",flush=True)
+          PY
+          sha256sum "$TMPDIR/dls_motor_redundancy.py" "$TMPDIR/d5a_train_redundant_motor.py" "$TMPDIR/d5a_eval_redundant_motor.py"
+
+      - name: Train clean and lesion-robust motor controllers at three seeds on three GPUs
+        shell: bash
+        run: |
+          set -euo pipefail
+          declare -a PIDS=()
+          declare -a SEEDS=(42 43 44)
+          for i in "${!SEEDS[@]}"; do
+            seed="${SEEDS[$i]}"
+            (
+              for arm in clean robust; do
+                "$DLS_ENV/bin/python" "$TMPDIR/d5a_train_redundant_motor.py" --arm "$arm" --seed "$seed" --gpu "$i" \
+                  > "$DLS_DATA_ROOT/reports/d5a/logs/train-$arm-seed$seed.log" 2>&1
+              done
+            ) &
+            PIDS+=("$!")
+          done
+          failed=0
+          for i in "${!PIDS[@]}"; do
+            seed="${SEEDS[$i]}"
+            if wait "${PIDS[$i]}"; then
+              echo "PASS D5a clean + robust seed$seed"
+              tail -1 "$DLS_DATA_ROOT/reports/d5a/logs/train-clean-seed$seed.log"
+              tail -1 "$DLS_DATA_ROOT/reports/d5a/logs/train-robust-seed$seed.log"
+            else
+              echo "FAIL D5a seed$seed"
+              for arm in clean robust; do
+                file="$DLS_DATA_ROOT/reports/d5a/logs/train-$arm-seed$seed.log"
+                if test -e "$file"; then tail -90 "$file"; fi
+              done
+              failed=1
+            fi
+          done
+          test "$failed" = 0
+
+      - name: Evaluate 3888 paired new-scene healthy and single-unit lesion episodes with 54 CPU workers
+        shell: bash
+        run: |
+          set -euo pipefail
+          declare -a PIDS=()
+          declare -a NAMES=()
+          for seed in 42 43 44; do
+            for arm in clean robust; do
+              for density in 0.00 0.10 0.25; do
+                for shard in 0 1 2; do
+                  name="$arm-seed$seed-density$density-shard$shard"
+                  "$DLS_ENV/bin/python" "$TMPDIR/d5a_eval_redundant_motor.py" \
+                    --arm "$arm" --seed "$seed" --density "$density" --shard "$shard" \
+                    > "$DLS_DATA_ROOT/reports/d5a/logs/eval-$name.log" 2>&1 &
+                  PIDS+=("$!")
+                  NAMES+=("$name")
+                done
+              done
+            done
+          done
+          test "${#PIDS[@]}" -eq 54
+          failed=0
+          for i in "${!PIDS[@]}"; do
+            if wait "${PIDS[$i]}"; then
+              echo "PASS D5a ${NAMES[$i]}"
+              tail -1 "$DLS_DATA_ROOT/reports/d5a/logs/eval-${NAMES[$i]}.log"
+            else
+              echo "FAIL D5a ${NAMES[$i]}"
+              tail -90 "$DLS_DATA_ROOT/reports/d5a/logs/eval-${NAMES[$i]}.log"
+              failed=1
+            fi
+          done
+          test "$failed" = 0
+
+      - name: Audit unchanged original C and summarize paired lesion differences
+        shell: bash
+        run: |
+          set -euo pipefail
+          sha256sum "$DLS_DATA_ROOT/checkpoints/d1-v1/"C-seed{42,43,44}.pt > "$DLS_DATA_ROOT/reports/d5a/original-C-sha256-after.txt"
+          cmp "$DLS_DATA_ROOT/reports/d5a/original-C-sha256-before.txt" "$DLS_DATA_ROOT/reports/d5a/original-C-sha256-after.txt"
+          "$DLS_ENV/bin/python" "$TMPDIR/d5a_aggregate_results.py"
+          {
+            printf '%s\n' "## D5a: learned eight-unit motor redundancy vs fault training"
+            printf '%s\n' "- 3 training seeds; 2 identical networks; original D1 expert data reused"
+            printf '%s\n' "- 3888 new heldout episodes: 24 scenes × 3 densities × 3 training seeds × 2 arms × 9 lesion conditions"
+            printf '%s\n' "- Original C weights unchanged, 3 GPU trainers + 54 CPU simulator processes"
+            printf '%s\n' "- Scientific scope: lesion robustness, not proof of online feedback motor synergy"
+            printf '%s\n' "- Summary: /mnt/datasets/lxb/dls/reports/d5a/d5a-summary.json"
+          } >> "$GITHUB_STEP_SUMMARY"
