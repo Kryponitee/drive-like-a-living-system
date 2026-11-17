@@ -1,0 +1,131 @@
+name: DLS D2a recurrent PPO correctness audit
+
+on:
+  push:
+    paths:
+      - .github/workflows/d2a-recurrent-ppo-audit.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: dls-d2a-correctness
+  cancel-in-progress: false
+
+jobs:
+  audit:
+    runs-on: [self-hosted, Linux, X64]
+    timeout-minutes: 18
+    env:
+      DLS_DATA_ROOT: /mnt/datasets/lxb/dls
+      DLS_ENV: /home/ps/miniconda3/envs/dls-p0
+      TMPDIR: /mnt/datasets/lxb/dls/tmp
+      XDG_CACHE_HOME: /mnt/datasets/lxb/dls/cache/xdg
+      PYTHONNOUSERSITE: "1"
+      OMP_NUM_THREADS: "1"
+      MKL_NUM_THREADS: "1"
+      OPENBLAS_NUM_THREADS: "1"
+      NUMEXPR_NUM_THREADS: "1"
+    steps:
+      - name: Verify immutable BC checkpoint and separate data disk
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(findmnt -n -o TARGET -T "$DLS_DATA_ROOT")" = "/mnt/datasets"
+          test "$(findmnt -n -o TARGET -T "$DLS_ENV")" = "/"
+          test -x "$DLS_ENV/bin/python"
+          test -f "$DLS_DATA_ROOT/reports/d1/d1f-fresh-scene-summary.json"
+          for variant in A B C; do
+            test -f "$DLS_DATA_ROOT/checkpoints/d1-v1/$variant-seed42.pt"
+          done
+          mkdir -p "$TMPDIR" "$DLS_DATA_ROOT/reports/d2a" "$DLS_DATA_ROOT/reports/d2a/logs"
+          test "$(df -Pk "$DLS_DATA_ROOT" | awk 'NR==2 {print $4}')" -gt 10485760
+          df -h "$DLS_DATA_ROOT"
+
+      - name: Load fixed source files from GitHub once
+        shell: bash
+        run: |
+          set -euo pipefail
+          for item in "src/dls_p0.py:dls_p0.py" "src/dls_recurrent_ppo.py:dls_recurrent_ppo.py" "scripts/d2a_recurrent_ppo_smoke.py:d2a_smoke.py"; do
+            SRC="${item%%:*}"
+            TARGET="${item#*:}"
+            RAW="https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/${GITHUB_SHA}/$SRC"
+            DONE=0
+            for URL in "https://gh-proxy.com/$RAW" "https://ghproxy.net/$RAW" "$RAW"; do
+              if curl -fLsS --connect-timeout 10 --max-time 60 "$URL" -o "$TMPDIR/$TARGET"; then
+                DONE=1
+                break
+              fi
+            done
+            test "$DONE" -eq 1
+            "$DLS_ENV/bin/python" -m py_compile "$TMPDIR/$TARGET"
+            sha256sum "$TMPDIR/$TARGET"
+          done
+
+      - name: Run three independent headless actual-simulator PPO math checks
+        shell: bash
+        run: |
+          set -euo pipefail
+          declare -a PIDS=()
+          declare -a VARIANTS=(A B C)
+          for variant in "${VARIANTS[@]}"; do
+            "$DLS_ENV/bin/python" "$TMPDIR/d2a_smoke.py" --variant "$variant" \
+              > "$DLS_DATA_ROOT/reports/d2a/logs/$variant.log" 2>&1 &
+            PIDS+=("$!")
+          done
+          FAILED=0
+          for i in "${!PIDS[@]}"; do
+            variant="${VARIANTS[$i]}"
+            if wait "${PIDS[$i]}"; then
+              echo "PASS D2a $variant"
+              tail -20 "$DLS_DATA_ROOT/reports/d2a/logs/$variant.log"
+            else
+              echo "FAIL D2a $variant"
+              tail -80 "$DLS_DATA_ROOT/reports/d2a/logs/$variant.log"
+              FAILED=1
+            fi
+          done
+          test "$FAILED" -eq 0
+
+      - name: Compare ratio, gradient, actual recurrent segment reuse across architectures
+        shell: bash
+        run: |
+          set -euo pipefail
+          "$DLS_ENV/bin/python" - <<'PY'
+          import json
+          from pathlib import Path
+          root=Path("/mnt/datasets/lxb/dls/reports/d2a")
+          reports={v:json.loads((root/f"recurrent-ppo-smoke-{v}.json").read_text()) for v in "ABC"}
+          for v, r in reports.items():
+              assert r["max_replayed_old_policy_ratio_error"] < 2e-5, v
+              assert r["total_rollout_steps"] >= 3
+              assert len(r["segments"]) == 3
+              assert r["actor_grad_norm"] > 0
+              assert r["critic_grad_norm"] > 0
+              assert r["policy_parameter_abs_change_after_one_optimizer_step"] > 0
+              assert r["tanh_log_prob_stress_finite"]
+              print(v, "steps:",r["total_rollout_steps"],
+                    "ratio_error:",r["max_replayed_old_policy_ratio_error"],
+                    "actor_grad:",r["actor_grad_norm"])
+          assert reports["B"]["policy_trainable_params_including_logstd"] == reports["C"]["policy_trainable_params_including_logstd"]
+          data={
+              "stage":"D2a engineering smoke, not evidence of driving skill or coordination",
+              "models":reports,
+              "policy_parameter_count_B_equals_C":True,
+              "all_old_policy_replays_match_log_prob":True,
+              "all_policy_and_value_gradients_finite":True,
+              "no_prior_checkpoints_overwritten":True,
+              "requires_D2b_rolling_memory_and_multi_env_test":True,
+          }
+          p=root/"d2a-summary.json"
+          p.write_text(json.dumps(data,indent=2),encoding="utf-8")
+          PY
+          {
+            echo "## D2a recurrent PPO smoke"
+            echo "- True MetaDrive rollouts with frozen BC checkpoint as initialization"
+            echo "- Replayed old-policy log probabilities, proper squashing Jacobian, GAE bootstrap, finite PPO gradient"
+            echo "- Reuses system Python environment and data-disk MetaDrive assets"
+            echo "- Summary: \`$DLS_DATA_ROOT/reports/d2a/d2a-summary.json\`"
+            echo "- This audit is NOT a full RL training run or communication-mechanism experiment"
+          } >> "$GITHUB_STEP_SUMMARY"
