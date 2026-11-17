@@ -1,11 +1,6 @@
 name: DLS D1-prime longitudinal dual-pedal A-B-C behavior cloning
 
 on:
-  push:
-    paths:
-      - .github/workflows/d1-longitudinal-bc.yml
-      - scripts/d1_longitudinal_bc.py
-      - src/dls_longitudinal_motor.py
   workflow_dispatch:
 
 permissions:
@@ -159,12 +154,13 @@ jobs:
                   assert report["train_episodes"]>=70 and report["val_episodes"]>=24
                   assert report["num_params"]==report["architecture"]["num_params"]
                   assert 0.0 <= report["best_val_huber"] < 1.0
+                  best=min(report["history"],key=lambda x:x["huber"])
                   rows.append({
                       "variant":variant,"seed":seed,"params":report["num_params"],
-                      "best_epoch":report["history"][report["best_epoch"]-1]["epoch"],
+                      "best_epoch":best["epoch"],
                       "val_huber":report["best_val_huber"],
-                      "throttle_mae":report["history"][report["best_epoch"]-1]["throttle_mae"],
-                      "brake_mae":report["history"][report["best_epoch"]-1]["brake_mae"],
+                      "throttle_mae":best["throttle_mae"],
+                      "brake_mae":best["brake_mae"],
                   })
           print(json.dumps(rows,indent=2))
           PY
