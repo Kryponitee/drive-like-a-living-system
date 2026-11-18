@@ -1,0 +1,208 @@
+name: DLS D2 frozen-C cross-module communication intervention
+
+on:
+  push:
+    paths:
+      - .github/workflows/d2-communication-block.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: dls-d2-communication-block
+  cancel-in-progress: false
+
+jobs:
+  intervene:
+    runs-on: [self-hosted, Linux, X64]
+    timeout-minutes: 90
+    env:
+      DLS_DATA_ROOT: /mnt/datasets/lxb/dls
+      DLS_DATA_ID: d1-longitudinal-v1-44117653285
+      DLS_ENV: /home/ps/miniconda3/envs/dls-p0
+      TMPDIR: /mnt/datasets/lxb/dls/tmp
+      XDG_CACHE_HOME: /mnt/datasets/lxb/dls/cache/xdg
+      PYTHONNOUSERSITE: "1"
+      OMP_NUM_THREADS: "1"
+      OPENBLAS_NUM_THREADS: "1"
+      MKL_NUM_THREADS: "1"
+      NUMEXPR_NUM_THREADS: "1"
+      PYTHONPATH: /mnt/datasets/lxb/dls/tmp
+    steps:
+      - name: Verify frozen checkpoints and completed paired baseline; do not overwrite outputs
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(findmnt -n -o TARGET -T "$DLS_DATA_ROOT")" = "/mnt/datasets"
+          test -x "$DLS_ENV/bin/python"
+          test -s "$DLS_DATA_ROOT/reports/$DLS_DATA_ID/closed-loop/aggregate.json"
+          test ! -e "$DLS_DATA_ROOT/reports/$DLS_DATA_ID/communication-ablation/paired-summary.json"
+          for seed in 42 43 44; do
+            test -s "$DLS_DATA_ROOT/checkpoints/$DLS_DATA_ID/C-seed$seed.pt"
+            test -s "$DLS_DATA_ROOT/reports/$DLS_DATA_ID/closed-loop/C-seed$seed.json"
+            test ! -e "$DLS_DATA_ROOT/reports/$DLS_DATA_ID/communication-ablation/C-seed$seed.json"
+            test ! -e "$DLS_DATA_ROOT/reports/$DLS_DATA_ID/communication-ablation/C-seed$seed-trajectories.npz"
+          done
+          mkdir -p "$TMPDIR"
+          df -h "$DLS_DATA_ROOT"
+
+      - name: Download pinned adapter, motor controller and intervention script
+        shell: bash
+        run: |
+          set -euo pipefail
+          for item in "src/dls_longitudinal_motor.py:dls_longitudinal_motor.py" \
+                      "src/dls_dual_pedal_adapter.py:dls_dual_pedal_adapter.py" \
+                      "scripts/d2_communication_block_eval.py:d2_communication_block_eval.py"; do
+            SRC="${item%%:*}"
+            NAME="${item#*:}"
+            RAW="https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/${GITHUB_SHA}/$SRC"
+            OK=0
+            for URL in "https://gh-proxy.com/$RAW" "https://ghproxy.net/$RAW" "$RAW"; do
+              if curl -fLsS --connect-timeout 10 --max-time 60 "$URL" -o "$TMPDIR/$NAME"; then
+                OK=1
+                break
+              fi
+            done
+            test "$OK" = 1
+            "$DLS_ENV/bin/python" -m py_compile "$TMPDIR/$NAME"
+          done
+          sha256sum "$TMPDIR/dls_longitudinal_motor.py" "$TMPDIR/dls_dual_pedal_adapter.py" "$TMPDIR/d2_communication_block_eval.py"
+
+      - name: Run three inference-only message-blocked C models on same 30 test scenes
+        shell: bash
+        run: |
+          set -euo pipefail
+          declare -a PIDS=()
+          declare -a SEEDS=()
+          for seed in 42 43 44; do
+            "$DLS_ENV/bin/python" "$TMPDIR/d2_communication_block_eval.py" \
+              --variant C --seed "$seed" --data-id "$DLS_DATA_ID" \
+              > "$DLS_DATA_ROOT/tmp/d2-block-${GITHUB_RUN_ID}-seed$seed.log" 2>&1 &
+            PIDS+=("$!")
+            SEEDS+=("$seed")
+          done
+          test "${#PIDS[@]}" -eq 3
+          failed=0
+          for i in "${!PIDS[@]}"; do
+            if wait "${PIDS[$i]}"; then
+              echo "PASS C-seed${SEEDS[$i]}"
+              tail -18 "$DLS_DATA_ROOT/tmp/d2-block-${GITHUB_RUN_ID}-seed${SEEDS[$i]}.log"
+            else
+              echo "FAIL C-seed${SEEDS[$i]}"
+              tail -120 "$DLS_DATA_ROOT/tmp/d2-block-${GITHUB_RUN_ID}-seed${SEEDS[$i]}.log"
+              failed=1
+            fi
+          done
+          test "$failed" -eq 0
+
+      - name: Validate trajectories and compute scene-paired causal differences
+        shell: bash
+        run: |
+          set -euo pipefail
+          "$DLS_ENV/bin/python" - <<'PY'
+          import hashlib
+          import json
+          import os
+          from pathlib import Path
+          import numpy as np
+
+          root = Path(os.environ["DLS_DATA_ROOT"])
+          data_id = os.environ["DLS_DATA_ID"]
+          base_dir = root / "reports" / data_id / "closed-loop"
+          block_dir = root / "reports" / data_id / "communication-ablation"
+          output_path = block_dir / "paired-summary.json"
+          assert not output_path.exists()
+          metrics = {
+              "success": "success",
+              "collision": "collision",
+              "out_of_road": "out_of_road",
+              "steps": "steps",
+              "reward_sum": "reward_sum",
+              "route_completion": "route_completion",
+              "mean_speed_mps": "mean_speed_mps",
+              "mean_throttle": "mean_throttle",
+              "mean_brake": "mean_brake",
+              "coactive_fraction_threshold_0_1": "coactive_fraction_threshold_0_1",
+              "mean_min_throttle_brake": "mean_min_throttle_brake",
+          }
+          all_pairs = []
+          per_seed = {}
+          for seed in (42, 43, 44):
+              baseline = json.loads((base_dir / f"C-seed{seed}.json").read_text())
+              blocked = json.loads((block_dir / f"C-seed{seed}.json").read_text())
+              assert baseline["variant"] == blocked["variant"] == "C"
+              assert baseline["training_seed"] == blocked["training_seed"] == seed
+              assert baseline["data_id"] == blocked["data_id"] == data_id
+              assert blocked["intervention"] == "all_cross_messages_zeroed_at_inference"
+              assert baseline["num_episodes"] == blocked["num_episodes"] == 30
+              archive_path = Path(blocked["trajectory_archive"])
+              assert archive_path == block_dir / f"C-seed{seed}-trajectories.npz"
+              assert hashlib.sha256(archive_path.read_bytes()).hexdigest() == blocked["trajectory_archive_sha256"]
+              with np.load(archive_path, allow_pickle=False) as z:
+                  assert len(z["episode_success"]) == 30
+                  assert len(z["episode_offsets"]) == 31
+                  assert int(z["episode_offsets"][-1]) == blocked["num_transitions"]
+                  assert int(z["episode_success"].sum()) == sum(x["success"] for x in blocked["episodes"])
+                  assert np.isfinite(z["throttle"]).all() and np.isfinite(z["brake"]).all()
+                  assert bool(np.all((z["throttle"] >= 0) & (z["throttle"] <= 1)))
+                  assert bool(np.all((z["brake"] >= 0) & (z["brake"] <= 1)))
+              pairs = []
+              for original, intervention in zip(baseline["episodes"], blocked["episodes"]):
+                  assert original["seed"] == intervention["seed"]
+                  assert original["density"] == intervention["density"]
+                  assert original["seed"] in (*range(30000,30010),*range(30100,30110),*range(30200,30210))
+                  pair = {
+                      "training_seed": seed,
+                      "scene_seed": original["seed"],
+                      "density": original["density"],
+                      "baseline": {name: float(original[key]) for name, key in metrics.items()},
+                      "blocked": {name: float(intervention[key]) for name, key in metrics.items()},
+                  }
+                  pairs.append(pair)
+                  all_pairs.append(pair)
+              per_seed[str(seed)] = {
+                  name: {
+                      "baseline_mean": float(np.mean([p["baseline"][name] for p in pairs])),
+                      "blocked_mean": float(np.mean([p["blocked"][name] for p in pairs])),
+                      "paired_delta": float(np.mean([p["blocked"][name]-p["baseline"][name] for p in pairs])),
+                  }
+                  for name in metrics
+              }
+
+          assert len(all_pairs) == 90
+          def summarize(items):
+              assert items
+              return {
+                  name: {
+                      "baseline_mean": float(np.mean([p["baseline"][name] for p in items])),
+                      "blocked_mean": float(np.mean([p["blocked"][name] for p in items])),
+                      "paired_delta": float(np.mean([p["blocked"][name]-p["baseline"][name] for p in items])),
+                  }
+                  for name in metrics
+              }
+          output = {
+              "stage": "D2 causal message interruption on frozen C",
+              "data_id": data_id,
+              "intervention": "zero all C cross-unit messages at inference without retraining",
+              "test_protocol": "3 training seeds x 30 held-out scenes, paired by training seed and scene seed; fixed zero steering",
+              "num_paired_episodes": len(all_pairs),
+              "overall": summarize(all_pairs),
+              "by_seed": per_seed,
+              "by_density": {f"{density:.2f}": summarize([p for p in all_pairs if p["density"] == density])
+                             for density in (0.0,0.1,0.25)},
+              "failed_baseline": [{"training_seed": p["training_seed"], "scene_seed": p["scene_seed"]}
+                                  for p in all_pairs if not p["baseline"]["success"]],
+              "failed_blocked": [{"training_seed": p["training_seed"], "scene_seed": p["scene_seed"]}
+                                 for p in all_pairs if not p["blocked"]["success"]],
+          }
+          output_path.write_text(json.dumps(output, ensure_ascii=False, indent=2))
+          print(json.dumps(output, ensure_ascii=False, indent=2), flush=True)
+          PY
+          {
+            printf '%s\n' "## DLS D2 inference-only C communication block"
+            printf '%s\n' "- Reused three frozen C checkpoints; no retraining"
+            printf '%s\n' "- 90 same-scene paired episodes: baseline cross-messages vs zero cross-messages"
+            printf '%s\n' "- Source D1-prime baseline preserved; no historical records overwritten"
+            printf '%s\n' "- Summary: $DLS_DATA_ROOT/reports/$DLS_DATA_ID/communication-ablation/paired-summary.json"
+          } >> "$GITHUB_STEP_SUMMARY"
