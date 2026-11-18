@@ -1,0 +1,187 @@
+name: DLS D3a-D3b artificial coordination-group calibration
+
+on:
+  push:
+    paths:
+      - .github/workflows/d3a-d3b-calibration.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: dls-d3a-d3b-calibration
+  cancel-in-progress: false
+
+jobs:
+  calibration:
+    runs-on: [self-hosted, Linux, X64]
+    timeout-minutes: 100
+    env:
+      DLS_DATA_ROOT: /mnt/datasets/lxb/dls
+      DLS_DATA_ID: d1-longitudinal-v1-44117653285
+      DLS_ENV: /home/ps/miniconda3/envs/dls-p0
+      TMPDIR: /mnt/datasets/lxb/dls/tmp
+      XDG_CACHE_HOME: /mnt/datasets/lxb/dls/cache/xdg
+      PYTHONNOUSERSITE: "1"
+      OMP_NUM_THREADS: "1"
+      OPENBLAS_NUM_THREADS: "1"
+      MKL_NUM_THREADS: "1"
+      NUMEXPR_NUM_THREADS: "1"
+    steps:
+      - name: Check existing DLS simulator trajectories and immutable outputs
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(findmnt -n -o TARGET -T "$DLS_DATA_ROOT")" = "/mnt/datasets"
+          test -x "$DLS_ENV/bin/python"
+          test -s "$DLS_DATA_ROOT/reports/$DLS_DATA_ID/closed-loop/A-seed42-trajectories.npz"
+          for seed in 42 43 44; do
+            test ! -e "$DLS_DATA_ROOT/reports/$DLS_DATA_ID/d3-identifiability-v1/d3a-seed$seed.json"
+            test ! -e "$DLS_DATA_ROOT/reports/$DLS_DATA_ID/d3-identifiability-v1/d3b-seed$seed.json"
+          done
+          test ! -e "$DLS_DATA_ROOT/reports/$DLS_DATA_ID/d3-identifiability-v1/aggregate.json"
+          mkdir -p "$TMPDIR"
+          nvidia-smi -L
+          df -h "$DLS_DATA_ROOT"
+
+      - name: Download and compile pinned D3a/D3b script
+        shell: bash
+        run: |
+          set -euo pipefail
+          RAW="https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/${GITHUB_SHA}/scripts/d3_artificial_group_calibration.py"
+          OK=0
+          for URL in "https://gh-proxy.com/$RAW" "https://ghproxy.net/$RAW" "$RAW"; do
+            if curl -fLsS --connect-timeout 10 --max-time 60 "$URL" -o "$TMPDIR/d3_artificial_group_calibration.py"; then
+              OK=1
+              break
+            fi
+          done
+          test "$OK" = 1
+          "$DLS_ENV/bin/python" -m py_compile "$TMPDIR/d3_artificial_group_calibration.py"
+          sha256sum "$TMPDIR/d3_artificial_group_calibration.py"
+
+      - name: D3a train positive, wrong-pair and negative controls on three GPUs
+        shell: bash
+        run: |
+          set -euo pipefail
+          declare -a PIDS=()
+          declare -a SEEDS=()
+          for index in 0 1 2; do
+            seed=$((42+index))
+            "$DLS_ENV/bin/python" "$TMPDIR/d3_artificial_group_calibration.py" \
+              --stage d3a --seed "$seed" --gpu "$index" \
+              > "$DLS_DATA_ROOT/tmp/d3a-${GITHUB_RUN_ID}-seed$seed.log" 2>&1 &
+            PIDS+=("$!")
+            SEEDS+=("$seed")
+          done
+          failed=0
+          for i in "${!PIDS[@]}"; do
+            if wait "${PIDS[$i]}"; then
+              echo "PASS D3a seed${SEEDS[$i]}"
+              grep -E 'D3a seed=' "$DLS_DATA_ROOT/tmp/d3a-${GITHUB_RUN_ID}-seed${SEEDS[$i]}.log"
+            else
+              echo "FAIL D3a seed${SEEDS[$i]}"
+              tail -100 "$DLS_DATA_ROOT/tmp/d3a-${GITHUB_RUN_ID}-seed${SEEDS[$i]}.log"
+              failed=1
+            fi
+          done
+          test "$failed" -eq 0
+
+      - name: D3b independently perturb senders and blindly recover group pairs
+        shell: bash
+        run: |
+          set -euo pipefail
+          declare -a PIDS=()
+          declare -a SEEDS=()
+          for index in 0 1 2; do
+            seed=$((42+index))
+            "$DLS_ENV/bin/python" "$TMPDIR/d3_artificial_group_calibration.py" \
+              --stage d3b --seed "$seed" --gpu "$index" \
+              > "$DLS_DATA_ROOT/tmp/d3b-${GITHUB_RUN_ID}-seed$seed.log" 2>&1 &
+            PIDS+=("$!")
+            SEEDS+=("$seed")
+          done
+          failed=0
+          for i in "${!PIDS[@]}"; do
+            if wait "${PIDS[$i]}"; then
+              echo "PASS D3b seed${SEEDS[$i]}"
+              grep -E 'D3b seed=' "$DLS_DATA_ROOT/tmp/d3b-${GITHUB_RUN_ID}-seed${SEEDS[$i]}.log"
+            else
+              echo "FAIL D3b seed${SEEDS[$i]}"
+              tail -100 "$DLS_DATA_ROOT/tmp/d3b-${GITHUB_RUN_ID}-seed${SEEDS[$i]}.log"
+              failed=1
+            fi
+          done
+          test "$failed" -eq 0
+
+      - name: Audit D3a/D3b outputs and write transparent scientific pass/fail gates
+        shell: bash
+        run: |
+          set -euo pipefail
+          "$DLS_ENV/bin/python" - <<'PY'
+          import json, hashlib, os
+          from pathlib import Path
+          import numpy as np
+          root=Path(os.environ["DLS_DATA_ROOT"])
+          data_id=os.environ["DLS_DATA_ID"]
+          report_dir=root/"reports"/data_id/"d3-identifiability-v1"
+          ckpt_dir=root/"checkpoints"/data_id/"d3-identifiability-v1"
+          path=report_dir/"aggregate.json"
+          assert not path.exists()
+          rows=[]
+          for seed in (42,43,44):
+              a=json.loads((report_dir/f"d3a-seed{seed}.json").read_text())
+              b=json.loads((report_dir/f"d3b-seed{seed}.json").read_text())
+              data_path=report_dir/f"calibration-data-seed{seed}.npz"
+              assert a["seed"]==b["seed"]==seed
+              assert hashlib.sha256(data_path.read_bytes()).hexdigest()==a["dataset_sha256"]
+              for variant in ("paired","no_comm","wrong_pair","null_unwired","null_wired"):
+                  assert (ckpt_dir/f"{variant}-seed{seed}.pt").is_file()
+                  assert np.isfinite(a["results"][variant]["test"]["mse"])
+              for variant in ("paired","no_comm","wrong_pair","null_unwired","null_wired"):
+                  assert len(b["controls"][variant]["normalized_receiver_activity_effect"])==4
+              row={
+                "seed":seed,
+                "true_pairs":a["ground_truth_pairs"],
+                "identified_pairs":b["predicted_pairs"],
+                "positive_ari":b["positive_adjusted_rand_index"],
+                "positive_mse":b["functional_fit_positive_mse"],
+                "no_comm_mse":b["functional_fit_no_comm_mse"],
+                "wrong_pair_mse":b["functional_fit_wrong_pair_mse"],
+                "paired_better_than_no_comm":b["functional_comm_advantage_over_no_comm"]>0,
+                "paired_better_than_wrong_pair":b["functional_comm_advantage_over_wrong_pair"]>0,
+                "exact_recovery":b["positive_pair_exact_recovery"],
+                "unwired_null_fp":not b["null_unwired_no_false_positive"],
+                "wired_additive_detected":b["controls"]["null_wired"]["detected"],
+                "message_task_relevance":b["positive_message_task_relevance"],
+              }
+              rows.append(row)
+          overview={
+            "stage":"D3a/D3b coordination-group calibration",
+            "scope":"4-module surrogate longitudinal motor control; NOT MetaDrive closed-loop driving",
+            "seeds":len(rows),
+            "per_seed":rows,
+            "mean_positive_ari":float(np.mean([r["positive_ari"] for r in rows])),
+            "paired_fit_wins_vs_no_comm":sum(r["paired_better_than_no_comm"] for r in rows),
+            "paired_fit_wins_vs_wrong_pair":sum(r["paired_better_than_wrong_pair"] for r in rows),
+            "exact_group_recoveries":sum(r["exact_recovery"] for r in rows),
+            "unwired_null_false_positives":sum(r["unwired_null_fp"] for r in rows),
+            "wired_additive_detected_count":sum(r["wired_additive_detected"] for r in rows),
+            "scientific_gate_all_pass":all(
+                r["paired_better_than_no_comm"] and r["paired_better_than_wrong_pair"]
+                and r["exact_recovery"] and not r["unwired_null_fp"]
+                and r["message_task_relevance"]
+                for r in rows),
+          }
+          path.write_text(json.dumps(overview,ensure_ascii=False,indent=2))
+          print(json.dumps(overview,ensure_ascii=False,indent=2),flush=True)
+          PY
+          {
+            printf '%s\n' "## D3a and D3b artificial coordination-group calibration"
+            printf '%s\n' "- 3 random seeds; physically grounded surrogate longitudinal states"
+            printf '%s\n' "- Correct pairing, wrong pairing, no messaging, and two null conditions"
+            printf '%s\n' "- Labels hidden from intervention-based identifier until final scoring"
+            printf '%s\n' "- Positive fit and group-identification gates are reported, not assumed"
+            printf '%s\n' "- Aggregate: $DLS_DATA_ROOT/reports/$DLS_DATA_ID/d3-identifiability-v1/aggregate.json"
+          } >> "$GITHUB_STEP_SUMMARY"
