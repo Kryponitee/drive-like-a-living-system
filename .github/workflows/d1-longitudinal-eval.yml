@@ -1,0 +1,171 @@
+name: DLS D1-prime longitudinal dual-pedal closed-loop evaluation
+
+on:
+  push:
+    paths:
+      - .github/workflows/d1-longitudinal-eval.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: dls-d1-longitudinal-eval
+  cancel-in-progress: false
+
+jobs:
+  evaluate:
+    runs-on: [self-hosted, Linux, X64]
+    timeout-minutes: 120
+    env:
+      DLS_DATA_ROOT: /mnt/datasets/lxb/dls
+      DLS_DATA_ID: d1-longitudinal-v1-44117653285
+      DLS_ENV: /home/ps/miniconda3/envs/dls-p0
+      TMPDIR: /mnt/datasets/lxb/dls/tmp
+      XDG_CACHE_HOME: /mnt/datasets/lxb/dls/cache/xdg
+      PYTHONNOUSERSITE: "1"
+      OMP_NUM_THREADS: "1"
+      OPENBLAS_NUM_THREADS: "1"
+      MKL_NUM_THREADS: "1"
+      NUMEXPR_NUM_THREADS: "1"
+      PYTHONPATH: /mnt/datasets/lxb/dls/tmp
+    steps:
+      - name: Verify nine existing checkpoints and unused evaluation output paths
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(findmnt -n -o TARGET -T "$DLS_DATA_ROOT")" = "/mnt/datasets"
+          test -x "$DLS_ENV/bin/python"
+          test -d "$DLS_DATA_ROOT/demonstrations/$DLS_DATA_ID/test"
+          test ! -e "$DLS_DATA_ROOT/reports/$DLS_DATA_ID/closed-loop/aggregate.json"
+          for variant in A B C; do
+            for seed in 42 43 44; do
+              test -s "$DLS_DATA_ROOT/checkpoints/$DLS_DATA_ID/$variant-seed$seed.pt"
+              test ! -e "$DLS_DATA_ROOT/reports/$DLS_DATA_ID/closed-loop/$variant-seed$seed.json"
+              test ! -e "$DLS_DATA_ROOT/reports/$DLS_DATA_ID/closed-loop/$variant-seed$seed-trajectories.npz"
+            done
+          done
+          mkdir -p "$TMPDIR"
+          df -h "$DLS_DATA_ROOT"
+
+      - name: Download pinned model, dual-pedal adapter and closed-loop evaluator
+        shell: bash
+        run: |
+          set -euo pipefail
+          for item in "src/dls_longitudinal_motor.py:dls_longitudinal_motor.py" \
+                      "src/dls_dual_pedal_adapter.py:dls_dual_pedal_adapter.py" \
+                      "scripts/d1_longitudinal_eval.py:d1_longitudinal_eval.py"; do
+            SRC="${item%%:*}"
+            NAME="${item#*:}"
+            RAW="https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/${GITHUB_SHA}/$SRC"
+            OK=0
+            for URL in "https://gh-proxy.com/$RAW" "https://ghproxy.net/$RAW" "$RAW"; do
+              if curl -fLsS --connect-timeout 10 --max-time 60 "$URL" -o "$TMPDIR/$NAME"; then
+                OK=1
+                break
+              fi
+            done
+            test "$OK" = 1
+            "$DLS_ENV/bin/python" -m py_compile "$TMPDIR/$NAME"
+          done
+          sha256sum "$TMPDIR/dls_longitudinal_motor.py" "$TMPDIR/dls_dual_pedal_adapter.py" "$TMPDIR/d1_longitudinal_eval.py"
+
+      - name: Evaluate 9 frozen controllers on 270 held-out MetaDrive scenarios
+        shell: bash
+        run: |
+          set -euo pipefail
+          declare -a PIDS=()
+          declare -a NAMES=()
+          for variant in A B C; do
+            for seed in 42 43 44; do
+              name="$variant-seed$seed"
+              "$DLS_ENV/bin/python" "$TMPDIR/d1_longitudinal_eval.py" \
+                --variant "$variant" --seed "$seed" --data-id "$DLS_DATA_ID" \
+                > "$DLS_DATA_ROOT/tmp/d1-eval-${GITHUB_RUN_ID}-$name.log" 2>&1 &
+              PIDS+=("$!")
+              NAMES+=("$name")
+            done
+          done
+          test "${#PIDS[@]}" -eq 9
+          failed=0
+          for i in "${!PIDS[@]}"; do
+            if wait "${PIDS[$i]}"; then
+              echo "PASS ${NAMES[$i]}"
+              tail -22 "$DLS_DATA_ROOT/tmp/d1-eval-${GITHUB_RUN_ID}-${NAMES[$i]}.log"
+            else
+              echo "FAIL ${NAMES[$i]}"
+              tail -120 "$DLS_DATA_ROOT/tmp/d1-eval-${GITHUB_RUN_ID}-${NAMES[$i]}.log"
+              failed=1
+            fi
+          done
+          test "$failed" -eq 0
+
+      - name: Audit closed-loop reports, trajectories and aggregate results
+        shell: bash
+        run: |
+          set -euo pipefail
+          "$DLS_ENV/bin/python" - <<'PY'
+          import hashlib
+          import json
+          import os
+          from pathlib import Path
+          import numpy as np
+
+          root = Path(os.environ["DLS_DATA_ROOT"])
+          data_id = os.environ["DLS_DATA_ID"]
+          directory = root / "reports" / data_id / "closed-loop"
+          aggregate_path = directory / "aggregate.json"
+          assert not aggregate_path.exists()
+          results = {}
+          for variant in ("A", "B", "C"):
+              records = []
+              for seed in (42, 43, 44):
+                  report_path = directory / f"{variant}-seed{seed}.json"
+                  report = json.loads(report_path.read_text())
+                  assert report["data_id"] == data_id
+                  assert report["variant"] == variant and report["training_seed"] == seed
+                  assert report["num_episodes"] == 30
+                  assert len(report["episodes"]) == 30
+                  assert report["test_seeds"] == [30000,30009,30100,30109,30200,30209]
+                  archive_path = Path(report["trajectory_archive"])
+                  assert archive_path == directory / f"{variant}-seed{seed}-trajectories.npz"
+                  assert hashlib.sha256(archive_path.read_bytes()).hexdigest() == report["trajectory_archive_sha256"]
+                  with np.load(archive_path, allow_pickle=False) as z:
+                      assert len(z["episode_success"]) == 30
+                      assert int(z["episode_success"].sum()) == sum(e["success"] for e in report["episodes"])
+                      assert np.all((z["throttle"] >= 0) & (z["throttle"] <= 1))
+                      assert np.all((z["brake"] >= 0) & (z["brake"] <= 1))
+                      assert len(z["episode_offsets"]) == 31
+                      assert int(z["episode_offsets"][-1]) == report["num_transitions"]
+                  assert all(e["seed"] in (*range(30000,30010), *range(30100,30110), *range(30200,30210)) for e in report["episodes"])
+                  records.append(report)
+              metrics = ("success_rate", "collision_rate", "out_of_road_rate",
+                         "mean_reward_per_episode", "mean_route_completion",
+                         "mean_coactive_fraction_threshold_0_1", "mean_min_throttle_brake")
+              summary = {}
+              for key in metrics:
+                  values = [float(r[key]) for r in records]
+                  summary[key] = {"mean": float(np.mean(values)), "std": float(np.std(values)), "by_seed": dict(zip(("42","43","44"), values))}
+              summary["success_rate_by_density"] = {
+                  density: float(np.mean([r["success_rate_by_density"][density] for r in records]))
+                  for density in ("0.00", "0.10", "0.25")
+              }
+              summary["total_episodes"] = sum(r["num_episodes"] for r in records)
+              summary["total_transitions"] = sum(r["num_transitions"] for r in records)
+              results[variant] = summary
+
+          output = {"stage": "D1-prime longitudinal dual-pedal closed-loop",
+                    "dataset_id": data_id, "protocol": "3 seeds x 3 densities x 10 test episodes per model; fixed external steering=0",
+                    "training": "no retraining; nine frozen pretrained checkpoints",
+                    "results": results}
+          aggregate_path.write_text(json.dumps(output, indent=2, ensure_ascii=False))
+          print(json.dumps(output, indent=2, ensure_ascii=False), flush=True)
+          PY
+          {
+            printf '%s\n' "## DLS D1-prime dual-pedal closed-loop"
+            printf '%s\n' "- Evaluated 9 frozen checkpoints (A/B/C × seeds 42,43,44); no retraining"
+            printf '%s\n' "- 270 scenario episodes across traffic densities 0.00, 0.10, 0.25"
+            printf '%s\n' "- Independent absolute [throttle, brake]; fixed external steering=0"
+            printf '%s\n' "- Reports and SHA256-verified trajectory archives under $DLS_DATA_ROOT/reports/$DLS_DATA_ID/closed-loop/"
+            printf '%s\n' "- Aggregate summary: $DLS_DATA_ROOT/reports/$DLS_DATA_ID/closed-loop/aggregate.json"
+          } >> "$GITHUB_STEP_SUMMARY"
