@@ -1,0 +1,187 @@
+name: DLS D3c retrained functional pairing counterfactual
+
+on:
+  push:
+    paths:
+      - .github/workflows/d3c-retrain-pairings.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: dls-d3c-retrain-pairings
+  cancel-in-progress: false
+
+jobs:
+  pairing:
+    runs-on: [self-hosted, Linux, X64]
+    timeout-minutes: 120
+    env:
+      DLS_DATA_ROOT: /mnt/datasets/lxb/dls
+      DLS_DATA_ID: d1-longitudinal-v1-44117653285
+      DLS_ENV: /home/ps/miniconda3/envs/dls-p0
+      TMPDIR: /mnt/datasets/lxb/dls/tmp
+      XDG_CACHE_HOME: /mnt/datasets/lxb/dls/cache/xdg
+      PYTHONNOUSERSITE: "1"
+      OMP_NUM_THREADS: "1"
+      OPENBLAS_NUM_THREADS: "1"
+      MKL_NUM_THREADS: "1"
+      NUMEXPR_NUM_THREADS: "1"
+      PYTHONPATH: /mnt/datasets/lxb/dls/tmp
+    steps:
+      - name: Verify immutable D3a inputs, GPU slots and fresh output paths
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(findmnt -n -o TARGET -T "$DLS_DATA_ROOT")" = "/mnt/datasets"
+          test -x "$DLS_ENV/bin/python"
+          test -s "$DLS_DATA_ROOT/reports/$DLS_DATA_ID/d3-identifiability-v1/aggregate.json"
+          test ! -e "$DLS_DATA_ROOT/reports/$DLS_DATA_ID/d3c-pairing-v1/aggregate.json"
+          for seed in 42 43 44; do
+            test -s "$DLS_DATA_ROOT/reports/$DLS_DATA_ID/d3-identifiability-v1/calibration-data-seed$seed.npz"
+            test -s "$DLS_DATA_ROOT/reports/$DLS_DATA_ID/d3-identifiability-v1/d3a-seed$seed.json"
+            test ! -e "$DLS_DATA_ROOT/reports/$DLS_DATA_ID/d3c-pairing-v1/data-seed$seed.json"
+          done
+          mkdir -p "$TMPDIR"
+          nvidia-smi -L
+          df -h "$DLS_DATA_ROOT"
+
+      - name: Download and compile frozen D3a architecture and D3c training code
+        shell: bash
+        run: |
+          set -euo pipefail
+          for item in "scripts/d3_artificial_group_calibration.py:d3_artificial_group_calibration.py" \
+                      "scripts/d3c_retrain_pairings.py:d3c_retrain_pairings.py"; do
+            SRC="${item%%:*}"
+            NAME="${item#*:}"
+            RAW="https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/${GITHUB_SHA}/$SRC"
+            OK=0
+            for URL in "https://gh-proxy.com/$RAW" "https://ghproxy.net/$RAW" "$RAW"; do
+              if curl -fLsS --connect-timeout 10 --max-time 60 "$URL" -o "$TMPDIR/$NAME"; then
+                OK=1
+                break
+              fi
+            done
+            test "$OK" = 1
+            "$DLS_ENV/bin/python" -m py_compile "$TMPDIR/$NAME"
+          done
+          sha256sum "$TMPDIR/d3_artificial_group_calibration.py" "$TMPDIR/d3c_retrain_pairings.py"
+
+      - name: Train 72 matched four-module controllers on 3 GPUs
+        shell: bash
+        run: |
+          set -euo pipefail
+          declare -a PIDS=()
+          declare -a SEEDS=()
+          for gpu in 0 1 2; do
+            seed=$((42+gpu))
+            "$DLS_ENV/bin/python" "$TMPDIR/d3c_retrain_pairings.py" \
+              --data-seed "$seed" --gpu "$gpu" \
+              > "$DLS_DATA_ROOT/tmp/d3c-${GITHUB_RUN_ID}-seed$seed.log" 2>&1 &
+            PIDS+=("$!")
+            SEEDS+=("$seed")
+          done
+          failed=0
+          for i in "${!PIDS[@]}"; do
+            if wait "${PIDS[$i]}"; then
+              echo "PASS D3c data-seed${SEEDS[$i]}"
+              tail -14 "$DLS_DATA_ROOT/tmp/d3c-${GITHUB_RUN_ID}-seed${SEEDS[$i]}.log"
+            else
+              echo "FAIL D3c data-seed${SEEDS[$i]}"
+              tail -120 "$DLS_DATA_ROOT/tmp/d3c-${GITHUB_RUN_ID}-seed${SEEDS[$i]}.log"
+              failed=1
+            fi
+          done
+          test "$failed" -eq 0
+
+      - name: Audit all topology fits and aggregate validation-selected results
+        shell: bash
+        run: |
+          set -euo pipefail
+          "$DLS_ENV/bin/python" - <<'PY'
+          import hashlib
+          import json
+          import os
+          from pathlib import Path
+          import numpy as np
+
+          root = Path(os.environ["DLS_DATA_ROOT"])
+          data_id = os.environ["DLS_DATA_ID"]
+          report_dir = root / "reports" / data_id / "d3c-pairing-v1"
+          checkpoint_dir = root / "checkpoints" / data_id / "d3c-pairing-v1"
+          source_dir = root / "reports" / data_id / "d3-identifiability-v1"
+          output_path = report_dir / "aggregate.json"
+          assert not output_path.exists()
+
+          rows = []
+          for data_seed in (42, 43, 44):
+              report = json.loads((report_dir / f"data-seed{data_seed}.json").read_text())
+              source = source_dir / f"calibration-data-seed{data_seed}.npz"
+              assert hashlib.sha256(source.read_bytes()).hexdigest() == report["data_archive_sha256"]
+              assert report["data_seed"] == data_seed and report["num_runs"] == 24
+              assert len(report["rows"]) == 6
+              for row in report["rows"]:
+                  assert row["data_seed"] == data_seed
+                  assert row["task"] in ("interaction", "additive")
+                  assert row["init_seed"] in (501,502,503)
+                  assert set(row["all_metrics"]) == {"P0","P1","P2","NONE"}
+                  assert row["validation_selected_topology"] in ("P0","P1","P2")
+                  assert np.isfinite(row["validation_selected_test_mse"])
+                  assert all(v["parameters"] == row["all_metrics"]["P0"]["parameters"]
+                             for v in row["all_metrics"].values())
+                  for topology, record in row["all_metrics"].items():
+                      path = Path(record["checkpoint"])
+                      assert path == checkpoint_dir / f"{row['task']}-d{data_seed}-i{row['init_seed']}-{topology}.pt"
+                      assert path.is_file() and path.stat().st_size > 1000
+                  rows.append(row)
+
+          assert len(rows) == 18
+          overview = {}
+          for task in ("interaction", "additive"):
+              chosen = [r for r in rows if r["task"] == task]
+              assert len(chosen) == 9
+              overview[task] = {
+                  "count": len(chosen),
+                  "correct_pairing_chosen_by_validation": sum(r["true_topology_best_by_validation"] for r in chosen),
+                  "correct_pairing_best_by_test_diagnostic": sum(r["true_topology_best_by_test"] for r in chosen),
+                  "mean_true_pairing_val_margin": float(np.mean([r["true_topology_margin_vs_best_other_validation"] for r in chosen])),
+                  "mean_true_pairing_test_margin": float(np.mean([r["true_topology_margin_vs_best_other_test"] for r in chosen])),
+                  "mean_val_selected_test_mse": float(np.mean([r["validation_selected_test_mse"] for r in chosen])),
+                  "mean_test_mse_by_topology": {
+                      topology: float(np.mean([r["all_metrics"][topology]["test_mse"] for r in chosen]))
+                      for topology in ("P0","P1","P2","NONE")
+                  },
+                  "per_data_seed": {
+                      str(seed): {
+                          "correct_val_count": sum(r["true_topology_best_by_validation"] for r in chosen if r["data_seed"] == seed),
+                          "correct_test_count": sum(r["true_topology_best_by_test"] for r in chosen if r["data_seed"] == seed),
+                          "validation_selected": [r["validation_selected_topology"] for r in chosen if r["data_seed"] == seed],
+                          "ground_truth": [r["true_topology_id_unsealed_for_scoring"] for r in chosen if r["data_seed"] == seed][0],
+                      }
+                      for seed in (42,43,44)
+                  }
+              }
+          out = {
+              "stage": "D3c retrained pairings on complementary vs additive targets",
+              "protocol": "3 D3a data seeds x 3 independent train seeds x 2 target types x (3 pairings + no communication); 72 retrainings",
+              "scope": "longitudinal driving-state surrogate, NOT MetaDrive closed-loop",
+              "selection": "lowest validation MSE across P0/P1/P2; held-out test assessed only afterward",
+              "comparison": "all candidate pairing models share data, init seed, model size, optimizer, and 70 epoch budget",
+              "summary": overview,
+              "scientific_gate": {
+                  "positive_correct_pairing_all_9": overview["interaction"]["correct_pairing_chosen_by_validation"] == 9,
+                  "negative_not_all_9_placebo": overview["additive"]["correct_pairing_chosen_by_validation"] < 9,
+                  "positive_mean_true_margin_positive": overview["interaction"]["mean_true_pairing_test_margin"] > 0,
+              },
+          }
+          output_path.write_text(json.dumps(out,ensure_ascii=False,indent=2))
+          print(json.dumps(out,ensure_ascii=False,indent=2),flush=True)
+          PY
+          {
+            printf '%s\n' "## DLS D3c from-scratch function-based topology counterfactual"
+            printf '%s\n' "- 72 total fresh models, 3 training GPUs, matched pairing seeds/budgets"
+            printf '%s\n' "- Includes positive complementary and negative additive target"
+            printf '%s\n' "- Candidate topology chosen by validation before held-out test scoring"
+            printf '%s\n' "- Report: $DLS_DATA_ROOT/reports/$DLS_DATA_ID/d3c-pairing-v1/aggregate.json"
+          } >> "$GITHUB_STEP_SUMMARY"
