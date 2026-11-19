@@ -1,0 +1,61 @@
+name: DLS dynamic following privileged physical feasibility reference
+
+on:
+  push:
+    paths:
+      - .github/workflows/dls-following-feasibility-oracle.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: dls-following-feasibility-oracle
+  cancel-in-progress: false
+
+jobs:
+  reference:
+    runs-on: [self-hosted, Linux, X64]
+    timeout-minutes: 15
+    env:
+      ROOT: /mnt/datasets/lxb/dls
+      DLS_ENV: /home/ps/miniconda3/envs/dls-p0
+      TMPDIR: /mnt/datasets/lxb/dls/tmp
+      XDG_CACHE_HOME: /mnt/datasets/lxb/dls/cache/xdg
+      PYTHONNOUSERSITE: "1"
+      OMP_NUM_THREADS: "1"
+      OPENBLAS_NUM_THREADS: "1"
+      MKL_NUM_THREADS: "1"
+    steps:
+      - name: Verify existing physical runs and unique oracle destination
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(findmnt -n -o TARGET -T "$ROOT")" = "/mnt/datasets"
+          P="$ROOT/reports/d1-longitudinal-v1-44117653285/dynamic-follow-v2"
+          test -s "$P/observation-visibility-seed41001.json"
+          test ! -e "$P/privileged-physical-reference.json"
+      - name: Fetch pinned reference and MetaDrive scene scripts
+        shell: bash
+        run: |
+          set -euo pipefail
+          WORK="$ROOT/tmp/dls-privileged-ref-${GITHUB_RUN_ID}"
+          mkdir -p "$WORK/src" "$WORK/scripts"
+          for path in src/dls_dual_pedal_adapter.py src/dls_longitudinal_motor.py scripts/dls_metadrive_controlled_lead_smoke.py scripts/dls_metadrive_dynamic_following_v2.py scripts/dls_metadrive_following_feasibility_oracle.py; do
+            RAW="https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/${GITHUB_SHA}/$path"
+            ok=0
+            for url in "https://gh-proxy.com/$RAW" "https://ghproxy.net/$RAW" "$RAW"; do
+              if curl -fLsS --connect-timeout 10 --max-time 60 "$url" -o "$WORK/$path"; then ok=1; break; fi
+            done
+            test "$ok" = 1
+            "$DLS_ENV/bin/python" -m py_compile "$WORK/$path"
+          done
+      - name: Run privileged ACC reference on identical physical braking scene
+        shell: bash
+        run: |
+          set -euo pipefail
+          WORK="$ROOT/tmp/dls-privileged-ref-${GITHUB_RUN_ID}"
+          "$DLS_ENV/bin/python" "$WORK/scripts/dls_metadrive_following_feasibility_oracle.py" \
+            --output "$ROOT/reports/d1-longitudinal-v1-44117653285/dynamic-follow-v2/privileged-physical-reference.json"
+          printf '%s\n' "## Physical feasibility gate" >> "$GITHUB_STEP_SUMMARY"
+          printf '%s\n' "Rule-based ACC reads privileged measured gap and leader speed, intentionally NOT a comparable learned controller; tests collision-free mobility possibility." >> "$GITHUB_STEP_SUMMARY"
