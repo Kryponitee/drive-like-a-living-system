@@ -1,0 +1,156 @@
+name: DLS D4 identical-budget dynamic-following A-B-C research
+
+on:
+  push:
+    paths:
+      - .github/workflows/dls-d4-dynamic-following.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: dls-d4-dynamic-following
+  cancel-in-progress: false
+
+jobs:
+  research:
+    runs-on: [self-hosted, Linux, X64]
+    timeout-minutes: 140
+    env:
+      ROOT: /mnt/datasets/lxb/dls
+      PY: /home/ps/miniconda3/envs/dls-p0/bin/python
+      TMPDIR: /mnt/datasets/lxb/dls/tmp
+      XDG_CACHE_HOME: /mnt/datasets/lxb/dls/cache/xdg
+      PYTHONNOUSERSITE: "1"
+      OMP_NUM_THREADS: "1"
+      OPENBLAS_NUM_THREADS: "1"
+      MKL_NUM_THREADS: "1"
+      NUMEXPR_NUM_THREADS: "1"
+    steps:
+      - name: Confirm original MetaDrive GPU and safe teacher prerequisites
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(findmnt -n -o TARGET -T "$ROOT")" = "/mnt/datasets"
+          test -x "$PY"
+          test -s "$ROOT/reports/d4-following-preflight/teacher-coverage-v1.json"
+          "$PY" - <<'PY'
+          import torch,metadrive
+          print("PyTorch",torch.__version__,"GPU",torch.cuda.device_count(),"MetaDrive",metadrive.__file__)
+          assert torch.cuda.is_available() and torch.cuda.device_count()>0
+          PY
+          DATA_ID="d4-dynamic-follow-v1-${GITHUB_RUN_ID}"
+          test ! -e "$ROOT/reports/$DATA_ID"
+          test ! -e "$ROOT/checkpoints/$DATA_ID"
+          test ! -e "$ROOT/demonstrations/$DATA_ID"
+      - name: Download exact pinned source files into data-disk work tree
+        shell: bash
+        run: |
+          set -euo pipefail
+          WORK="$ROOT/tmp/dls-d4-${GITHUB_RUN_ID}"
+          mkdir -p "$WORK/src" "$WORK/scripts"
+          for path in src/dls_longitudinal_motor.py src/dls_dual_pedal_adapter.py src/dls_d4_following_scene.py scripts/dls_d4_collect.py scripts/dls_d4_bc.py scripts/dls_d4_eval.py scripts/dls_d4_holdout_oracle.py scripts/dls_d4_aggregate.py; do
+            RAW="https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/${GITHUB_SHA}/$path"
+            ok=0
+            for url in "https://gh-proxy.com/$RAW" "https://ghproxy.net/$RAW" "$RAW"; do
+              if curl -fLsS --connect-timeout 10 --max-time 90 "$url" -o "$WORK/$path"; then ok=1; break; fi
+            done
+            test "$ok" = 1
+            "$PY" -m py_compile "$WORK/$path"
+            sha256sum "$WORK/$path"
+          done
+      - name: Collect 72 training and 24 validation physical expert demonstrations
+        shell: bash
+        run: |
+          set -euo pipefail
+          WORK="$ROOT/tmp/dls-d4-${GITHUB_RUN_ID}"
+          DATA_ID="d4-dynamic-follow-v1-${GITHUB_RUN_ID}"
+          "$PY" "$WORK/scripts/dls_d4_collect.py" --split train --data-id "$DATA_ID"
+          "$PY" "$WORK/scripts/dls_d4_collect.py" --split val --data-id "$DATA_ID"
+      - name: Validate 24 completely heldout privileged physical references
+        shell: bash
+        run: |
+          set -euo pipefail
+          WORK="$ROOT/tmp/dls-d4-${GITHUB_RUN_ID}"
+          DATA_ID="d4-dynamic-follow-v1-${GITHUB_RUN_ID}"
+          "$PY" "$WORK/scripts/dls_d4_holdout_oracle.py" --data-id "$DATA_ID"
+      - name: Train all nine policies using identical 20-epoch budgets
+        shell: bash
+        run: |
+          set -euo pipefail
+          WORK="$ROOT/tmp/dls-d4-${GITHUB_RUN_ID}"
+          DATA_ID="d4-dynamic-follow-v1-${GITHUB_RUN_ID}"
+          GPUS="$("$PY" -c 'import torch; print(torch.cuda.device_count())')"
+          test "$GPUS" -gt 0
+          echo "GPU devices available: $GPUS"
+          declare -a pids=()
+          declare -a names=()
+          idx=0
+          for variant in A B C; do
+            for seed in 42 43 44; do
+              gpu=$((idx % GPUS))
+              name="$variant-seed$seed"
+              "$PY" "$WORK/scripts/dls_d4_bc.py" --variant "$variant" --seed "$seed" --gpu "$gpu" --data-id "$DATA_ID" > "$WORK/train-$name.log" 2>&1 &
+              pids+=("$!")
+              names+=("$name")
+              idx=$((idx+1))
+            done
+          done
+          failed=0
+          for i in "${!pids[@]}"; do
+            if wait "${pids[$i]}"; then
+              echo "TRAIN PASS ${names[$i]}"
+              tail -5 "$WORK/train-${names[$i]}.log"
+            else
+              echo "TRAIN FAIL ${names[$i]}"
+              tail -100 "$WORK/train-${names[$i]}.log"
+              failed=1
+            fi
+          done
+          test "$failed" = 0
+      - name: Freeze trained models and evaluate all paired unseen MetaDrive scenes
+        shell: bash
+        run: |
+          set -euo pipefail
+          WORK="$ROOT/tmp/dls-d4-${GITHUB_RUN_ID}"
+          DATA_ID="d4-dynamic-follow-v1-${GITHUB_RUN_ID}"
+          declare -a pids=()
+          declare -a names=()
+          for variant in A B C; do
+            for seed in 42 43 44; do
+              name="$variant-seed$seed"
+              "$PY" "$WORK/scripts/dls_d4_eval.py" --variant "$variant" --seed "$seed" --data-id "$DATA_ID" > "$WORK/eval-$name.log" 2>&1 &
+              pids+=("$!")
+              names+=("$name")
+            done
+          done
+          failed=0
+          for i in "${!pids[@]}"; do
+            if wait "${pids[$i]}"; then
+              echo "EVAL PASS ${names[$i]}"
+              tail -5 "$WORK/eval-${names[$i]}.log"
+            else
+              echo "EVAL FAIL ${names[$i]}"
+              tail -100 "$WORK/eval-${names[$i]}.log"
+              failed=1
+            fi
+          done
+          test "$failed" = 0
+      - name: Aggregate heldout safety metrics and dynamic computational responsibility
+        shell: bash
+        run: |
+          set -euo pipefail
+          WORK="$ROOT/tmp/dls-d4-${GITHUB_RUN_ID}"
+          DATA_ID="d4-dynamic-follow-v1-${GITHUB_RUN_ID}"
+          "$PY" "$WORK/scripts/dls_d4_aggregate.py" --data-id "$DATA_ID"
+          test -s "$ROOT/reports/$DATA_ID/d4-overview.json"
+          {
+            printf '%s\n' "## DLS D4 dynamic following"
+            printf '%s\n' "- Data ID: $DATA_ID"
+            printf '%s\n' "- Same MetaDrive 259D inputs and 20-epoch training for A/B/C, 3 training seeds each"
+            printf '%s\n' "- Physical teacher 72 train, 24 val, 24 heldout feasibility episodes"
+            printf '%s\n' "- 252 matched heldout neural closed-loop episodes including C post-brake message cut"
+            printf '%s\n' "- Reports: $ROOT/reports/$DATA_ID/d4-overview.json"
+            printf '%s\n' "- Original D1/D3/FRA checkpoints and data remain unchanged"
+          } >> "$GITHUB_STEP_SUMMARY"
