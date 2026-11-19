@@ -1,0 +1,50 @@
+name: DLS D4 posthoc safe-arrival and brake-event audit
+
+on:
+  push:
+    paths:
+      - .github/workflows/dls-d4-outcome-audit.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: dls-d4-outcome-audit
+  cancel-in-progress: false
+
+jobs:
+  audit:
+    runs-on: [self-hosted, Linux, X64]
+    timeout-minutes: 10
+    env:
+      ROOT: /mnt/datasets/lxb/dls
+      PY: /home/ps/miniconda3/envs/dls-p0/bin/python
+      OMP_NUM_THREADS: "1"
+      OPENBLAS_NUM_THREADS: "1"
+      PYTHONNOUSERSITE: "1"
+    steps:
+      - name: Verify complete original D4 frozen trial data
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(findmnt -n -o TARGET -T "$ROOT")" = "/mnt/datasets"
+          DATA_ID=d4-dynamic-follow-v1-44481405397
+          test -s "$ROOT/reports/$DATA_ID/d4-overview.json"
+          test ! -e "$ROOT/reports/$DATA_ID/d4-outcome-meaning-audit.json"
+      - name: Run posthoc pure read-only outcome semantics audit
+        shell: bash
+        run: |
+          set -euo pipefail
+          WORK="$ROOT/tmp/dls-d4-outcome-${GITHUB_RUN_ID}"
+          mkdir -p "$WORK"
+          RAW="https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/${GITHUB_SHA}/scripts/dls_d4_outcome_audit.py"
+          ok=0
+          for URL in "https://gh-proxy.com/$RAW" "https://ghproxy.net/$RAW" "$RAW"; do
+            if curl -fLsS --connect-timeout 10 --max-time 60 "$URL" -o "$WORK/audit.py"; then ok=1; break; fi
+          done
+          test "$ok" = 1
+          "$PY" -m py_compile "$WORK/audit.py"
+          "$PY" "$WORK/audit.py" --data-id d4-dynamic-follow-v1-44481405397
+          printf '%s\n' "## D4 actual safety outcome semantics" >> "$GITHUB_STEP_SUMMARY"
+          printf '%s\n' "Audited success/collision label overlap and event-time gap and closing speed for all 252 closed-loop episodes." >> "$GITHUB_STEP_SUMMARY"
