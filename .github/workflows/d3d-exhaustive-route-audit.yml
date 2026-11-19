@@ -1,0 +1,152 @@
+name: DLS D3d frozen module exhaustive routing audit
+
+on:
+  push:
+    paths:
+      - .github/workflows/d3d-exhaustive-route-audit.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: dls-d3d-exhaustive-route-audit
+  cancel-in-progress: false
+
+jobs:
+  exhaustive:
+    runs-on: [self-hosted, Linux, X64]
+    timeout-minutes: 30
+    env:
+      DLS_DATA_ROOT: /mnt/datasets/lxb/dls
+      DLS_DATA_ID: d1-longitudinal-v1-44117653285
+      DLS_ENV: /home/ps/miniconda3/envs/dls-p0
+      TMPDIR: /mnt/datasets/lxb/dls/tmp
+      PYTHONNOUSERSITE: "1"
+      OMP_NUM_THREADS: "1"
+      OPENBLAS_NUM_THREADS: "1"
+      MKL_NUM_THREADS: "1"
+      NUMEXPR_NUM_THREADS: "1"
+      PYTHONPATH: /mnt/datasets/lxb/dls/tmp
+    steps:
+      - name: Check D3d checkpoints and fresh analysis paths
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(findmnt -n -o TARGET -T "$DLS_DATA_ROOT")" = "/mnt/datasets"
+          test -s "$DLS_DATA_ROOT/reports/$DLS_DATA_ID/d3d-free-routing-v1/aggregate.json"
+          test ! -e "$DLS_DATA_ROOT/reports/$DLS_DATA_ID/d3d-free-routing-v1/exhaustive-aggregate.json"
+          for seed in 42 43 44; do
+            test ! -e "$DLS_DATA_ROOT/reports/$DLS_DATA_ID/d3d-free-routing-v1/routing-exhaustive-seed$seed.json"
+            for init in 501 502 503; do
+              for task in interaction additive; do
+                test -s "$DLS_DATA_ROOT/checkpoints/$DLS_DATA_ID/d3d-free-routing-v1/$task-d$seed-i$init.pt"
+              done
+            done
+          done
+          nvidia-smi -L
+
+      - name: Fetch source and verify frozen evaluator
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$TMPDIR"
+          for name in d3_artificial_group_calibration.py d3d_free_routing.py d3d_exhaustive_route_diagnostic.py; do
+            RAW="https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/${GITHUB_SHA}/scripts/$name"
+            OK=0
+            for URL in "https://gh-proxy.com/$RAW" "https://ghproxy.net/$RAW" "$RAW"; do
+              if curl -fLsS --connect-timeout 10 --max-time 60 "$URL" -o "$TMPDIR/$name"; then
+                OK=1
+                break
+              fi
+            done
+            test "$OK" = 1
+            "$DLS_ENV/bin/python" -m py_compile "$TMPDIR/$name"
+          done
+
+      - name: Evaluate all 256 graphs for each frozen module checkpoint
+        shell: bash
+        run: |
+          set -euo pipefail
+          declare -a PIDS=()
+          for gpu in 0 1 2; do
+            seed=$((42+gpu))
+            "$DLS_ENV/bin/python" "$TMPDIR/d3d_exhaustive_route_diagnostic.py" \
+              --data-seed "$seed" --gpu "$gpu" > "$TMPDIR/d3d-exhaustive-$seed-${GITHUB_RUN_ID}.log" 2>&1 &
+            PIDS+=("$!")
+          done
+          fail=0
+          for gpu in 0 1 2; do
+            if wait "${PIDS[$gpu]}"; then
+              echo "PASS seed $((42+gpu))"
+              grep "D3d exhaustive d=" "$TMPDIR/d3d-exhaustive-$((42+gpu))-${GITHUB_RUN_ID}.log"
+            else
+              echo "FAIL seed $((42+gpu))"
+              tail -100 "$TMPDIR/d3d-exhaustive-$((42+gpu))-${GITHUB_RUN_ID}.log"
+              fail=1
+            fi
+          done
+          test "$fail" -eq 0
+
+      - name: Aggregate model-side specialization versus router optimization
+        shell: bash
+        run: |
+          set -euo pipefail
+          "$DLS_ENV/bin/python" - <<'PY'
+          import json,os
+          from pathlib import Path
+          import numpy as np
+          root=Path(os.environ["DLS_DATA_ROOT"])/"reports"/os.environ["DLS_DATA_ID"]/"d3d-free-routing-v1"
+          outpath=root/"exhaustive-aggregate.json"
+          assert not outpath.exists()
+          rows=[]
+          for seed in (42,43,44):
+              d=json.loads((root/f"routing-exhaustive-seed{seed}.json").read_text())
+              assert d["data_seed"]==seed and d["candidate_topologies"]==256 and d["no_retraining"]
+              assert len(d["rows"])==6
+              rows.extend(d["rows"])
+          assert len(rows)==18
+          summary={}
+          for task in ("interaction","additive"):
+              data=[r for r in rows if r["task"]==task]
+              assert len(data)==9
+              summary[task]={
+                  "n":9,
+                  "best_val_full_256_finds_true_pair":sum(r["val_optimal_senders"]==r["true_pair_senders"] for r in data),
+                  "best_val_3_reciprocal_pairs_finds_true":sum(r["best_pair_is_true"] for r in data),
+                  "mean_true_pair_val_rank_among_256":float(np.mean([r["true_pair_val_rank_among_256"] for r in data])),
+                  "median_true_pair_val_rank_among_256":float(np.median([r["true_pair_val_rank_among_256"] for r in data])),
+                  "mean_learned_val_mse":float(np.mean([r["learned_val_mse"] for r in data])),
+                  "mean_val_selected_256_val_mse":float(np.mean([r["val_optimal_val_mse"] for r in data])),
+                  "mean_learned_test_mse":float(np.mean([r["learned_test_mse"] for r in data])),
+                  "mean_val_selected_256_test_mse":float(np.mean([r["val_optimal_test_mse"] for r in data])),
+                  "mean_true_pair_test_mse":float(np.mean([r["true_pair_test_mse"] for r in data])),
+                  "mean_val_routing_regret":float(np.mean([r["learned_val_regret"] for r in data])),
+                  "better_val_route_exists_count":sum(r["learned_val_regret"]>1e-6 for r in data),
+                  "mean_val_selected_test_improvement":float(np.mean([r["learned_test_minus_val_selected"] for r in data])),
+                  "per_run":[{
+                      "data_seed":r["data_seed"],"init_seed":r["init_seed"],
+                      "learned_senders":r["learned_senders"],
+                      "best_senders_256":r["val_optimal_senders"],
+                      "val_true_pair_rank":r["true_pair_val_rank_among_256"],
+                      "best_reciprocal_pair_is_true":r["best_pair_is_true"],
+                      "learned_val_mse":r["learned_val_mse"],
+                      "best_256_val_mse":r["val_optimal_val_mse"],
+                  } for r in data]
+              }
+          report={
+              "stage":"D3d frozen-module exhaustive partner oracle",
+              "purpose":"Separate suboptimal routing optimization from the absence of task-aligned specialization in already-trained modules",
+              "scope":"four-module synthetic longitudinal-state surrogate; no MetaDrive closed-loop",
+              "n_models":18,
+              "n_graphs_per_model":256,
+              "selection":"minimum validation MSE per frozen checkpoint, then held-out test only",
+              "summary":summary,
+          }
+          outpath.write_text(json.dumps(report,ensure_ascii=False,indent=2))
+          print(json.dumps(report,ensure_ascii=False,indent=2),flush=True)
+          PY
+          printf '%s\n' "## D3d frozen-module routing exhaustive audit" >> "$GITHUB_STEP_SUMMARY"
+          printf '%s\n' "- 18 frozen checkpoints x 256 allowed hard directed graphs, without retraining" >> "$GITHUB_STEP_SUMMARY"
+          printf '%s\n' "- Selection by validation loss; independent test measurement" >> "$GITHUB_STEP_SUMMARY"
+          printf '%s\n' "- Report: $DLS_DATA_ROOT/reports/$DLS_DATA_ID/d3d-free-routing-v1/exhaustive-aggregate.json" >> "$GITHUB_STEP_SUMMARY"
