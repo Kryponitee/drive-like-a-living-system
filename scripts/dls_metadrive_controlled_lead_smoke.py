@@ -45,10 +45,14 @@ class ScriptedLeadManager(BaseManager):
         assert lane is not None, "Ego must be assigned to a valid lane."
         longitudinal,lateral=lane.local_coordinates(ego.position)
         lane_length=float(lane.length)
-        assert lane_length>longitudinal+gap_m+5, (lane_length,longitudinal,gap_m)
+        # 初始 spawn lane 只有 10m，前方连接另一个直线 lane。
+        # 直接沿自车当前航向放置，不能错误地要求 lead 仍在 spawn lane 内。
+        direction=np.asarray(ego.heading,dtype=np.float64)
+        assert direction.shape==(2,) and np.linalg.norm(direction)>0.9
+        direction=direction/np.linalg.norm(direction)
+        pos=np.asarray(ego.position,dtype=np.float64)+gap_m*direction
+        heading=float(ego.heading_theta)
         lead_s=longitudinal+gap_m
-        pos=lane.position(lead_s,lateral)
-        heading=float(lane.heading_theta_at(lead_s))
         self.lead=self.spawn_object(
             DefaultVehicle,vehicle_config=dict(),position=pos,heading=heading)
         self.spawn_s=float(lead_s)
