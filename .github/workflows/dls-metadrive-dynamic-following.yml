@@ -1,0 +1,142 @@
+name: DLS MetaDrive frozen A-B-C dynamic following closed-loop
+
+on:
+  push:
+    paths:
+      - .github/workflows/dls-metadrive-dynamic-following.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: dls-metadrive-dynamic-following-v1
+  cancel-in-progress: false
+
+jobs:
+  evaluate:
+    runs-on: [self-hosted, Linux, X64]
+    timeout-minutes: 65
+    env:
+      DLS_ROOT: /mnt/datasets/lxb/dls
+      DLS_ENV: /home/ps/miniconda3/envs/dls-p0
+      TMPDIR: /mnt/datasets/lxb/dls/tmp
+      XDG_CACHE_HOME: /mnt/datasets/lxb/dls/cache/xdg
+      PYTHONNOUSERSITE: "1"
+      OMP_NUM_THREADS: "1"
+      OPENBLAS_NUM_THREADS: "1"
+      MKL_NUM_THREADS: "1"
+    steps:
+      - name: Verify successful physical lead feasibility and frozen models
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(findmnt -n -o TARGET -T "$DLS_ROOT")" = "/mnt/datasets"
+          test -s "$DLS_ROOT/reports/controlled-lead-v0/physics-seed41000.json"
+          test ! -e "$DLS_ROOT/reports/d1-longitudinal-v1-44117653285/dynamic-follow-v1/aggregate.json"
+          for variant in A B C; do
+            for seed in 42 43 44; do
+              test -s "$DLS_ROOT/checkpoints/d1-longitudinal-v1-44117653285/$variant-seed$seed.pt"
+              test ! -e "$DLS_ROOT/reports/d1-longitudinal-v1-44117653285/dynamic-follow-v1/$variant-seed$seed.json"
+            done
+          done
+      - name: Fetch pinned dual-pedal model scene and evaluation
+        shell: bash
+        run: |
+          set -euo pipefail
+          WORK="$DLS_ROOT/tmp/dls-dynamic-follow-${GITHUB_RUN_ID}"
+          mkdir -p "$WORK/src" "$WORK/scripts"
+          for path in src/dls_longitudinal_motor.py src/dls_dual_pedal_adapter.py scripts/dls_metadrive_controlled_lead_smoke.py scripts/dls_metadrive_dynamic_following.py; do
+            RAW="https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/${GITHUB_SHA}/$path"
+            ok=0
+            for url in "https://gh-proxy.com/$RAW" "https://ghproxy.net/$RAW" "$RAW"; do
+              if curl -fLsS --connect-timeout 10 --max-time 60 "$url" -o "$WORK/$path"; then ok=1; break; fi
+            done
+            test "$ok" = 1
+            "$DLS_ENV/bin/python" -m py_compile "$WORK/$path"
+          done
+      - name: Run 9 independently pretrained controllers on 54 paired dynamic episodes
+        shell: bash
+        run: |
+          set -euo pipefail
+          WORK="$DLS_ROOT/tmp/dls-dynamic-follow-${GITHUB_RUN_ID}"
+          declare -a pids=()
+          declare -a names=()
+          for variant in A B C; do
+            for seed in 42 43 44; do
+              name="$variant-seed$seed"
+              "$DLS_ENV/bin/python" "$WORK/scripts/dls_metadrive_dynamic_following.py" \
+                --variant "$variant" --seed "$seed" \
+                > "$WORK/$name.log" 2>&1 &
+              pids+=("$!")
+              names+=("$name")
+            done
+          done
+          failed=0
+          for i in "${!pids[@]}"; do
+            if wait "${pids[$i]}"; then
+              echo "PASS ${names[$i]}"
+              tail -7 "$WORK/${names[$i]}.log"
+            else
+              echo "FAIL ${names[$i]}"
+              tail -150 "$WORK/${names[$i]}.log"
+              failed=1
+            fi
+          done
+          test "$failed" = 0
+      - name: Audit paired scenario outputs and controlled lead pulse coverage
+        shell: bash
+        run: |
+          set -euo pipefail
+          "$DLS_ENV/bin/python" - <<'PY'
+          import json
+          from pathlib import Path
+          import numpy as np
+          root=Path("/mnt/datasets/lxb/dls/reports/d1-longitudinal-v1-44117653285/dynamic-follow-v1")
+          result={}
+          for variant in ("A","B","C"):
+              rows=[]
+              for seed in (42,43,44):
+                  p=root/f"{variant}-seed{seed}.json"
+                  obj=json.loads(p.read_text())
+                  assert obj["model_variant"]==variant and obj["training_seed"]==seed
+                  assert len(obj["results"])==6
+                  for ep in obj["results"]:
+                      assert ep["condition"] in ("free","constant","pulse")
+                      assert ep["scene_seed"] in (41001,41002)
+                      assert 1<=ep["steps"]<=160
+                      assert len(ep["steps_trace"])==ep["steps"]
+                  rows.extend(obj["results"])
+              d={}
+              for condition in ("free","constant","pulse"):
+                  group=[e for e in rows if e["condition"]==condition]
+                  assert len(group)==6
+                  d[condition]={
+                      "episodes":len(group),
+                      "total_steps":sum(e["steps"] for e in group),
+                      "success_rate":float(np.mean([e["success"] for e in group])),
+                      "collision_rate":float(np.mean([e["collision"] for e in group])),
+                      "mean_steps":float(np.mean([e["steps"] for e in group])),
+                      "mean_coactive_fraction":float(np.mean([e["mean_coactive_fraction"] for e in group])),
+                      "min_observed_surface_gap_m":min(e["min_surface_gap_m"] for e in group if e["min_surface_gap_m"] is not None) if condition!="free" else None,
+                      "max_observed_phase":max(e["max_phase_seen"] for e in group),
+                      "mean_one_tick_message_shift":(
+                          float(np.mean([e["mean_one_tick_message_shift"] for e in group]))
+                          if variant=="C" else None
+                      ),
+                  }
+              result[variant]=d
+          out=root/"aggregate.json"
+          assert not out.exists()
+          artifact={
+              "stage":"DLS frozen pretrained A/B/C dynamic scripted-lead MetaDrive test",
+              "design":"3 training seeds x 2 physical scenario seeds x 3 conditions per architecture",
+              "total_episodes":54,"new_training":False,
+              "limitations":"small preliminary controlled test; no retraining for following; no validated dynamic functional responsibility transfer yet",
+              "by_architecture":result,
+          }
+          out.write_text(json.dumps(artifact,indent=2,ensure_ascii=False))
+          print(json.dumps(artifact,indent=2,ensure_ascii=False))
+          PY
+          printf '%s\n' "## MetaDrive dynamic following closed-loop" >> "$GITHUB_STEP_SUMMARY"
+          printf '%s\n' "54 paired episodes, nine pretrained D1-prime controllers, 2 new scenario seeds, lead absent/constant/pulse, 8-module logit traces." >> "$GITHUB_STEP_SUMMARY"
