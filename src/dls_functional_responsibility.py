@@ -45,28 +45,36 @@ def _four_worlds(x, donor, i, j):
     return x, one, two, both
 
 
-def audit_pairwise_responsibility(adapter, x, donor, target_logit,
+def audit_pairwise_responsibility(adapter, x, donor, target_logit=None,
                                   *, available=None, communication=True,
-                                  valid_interventions=False, epsilon=1e-9):
+                                  valid_interventions=False, epsilon=1e-9,
+                                  target_output=None):
     """度量每个变量对在整体及各模块中实现的二阶计算责任。
 
-    target_logit: 接受 [B,F] 输入并返回 [B,O] 的无状态真值函数；
-    教学实验中只用于评分，绝不输入学习器。
+    target_logit: 可选的已知真值 logit 函数；未知时仍计算模型自身交互与模块分解。
+    target_output: 未知真值logit时，可选提供观测标签 [B,O] 来计算预测MSE。
+    教学实验的真值函数只用于评分，绝不输入学习器。
     valid_interventions: 必须由调用者确认独立变量生成机制或有效条件反事实。
     """
     assert valid_interventions, "先证明反事实输入有效：相关真实特征不可直接交换"
     assert x.ndim == 2 and x.shape == donor.shape
     assert x.shape[1] == adapter.num_features
     assert not torch.equal(x, donor)
-    assert target_logit is not None
     assert x.device == donor.device
     with torch.no_grad():
         original = adapter.evaluate(x, available=available,
                                     communication=communication)
-        target = target_logit(x)
-        assert target.shape == original["logits"].shape
-        assert torch.isfinite(target).all()
-        pred_loss = F.mse_loss(original["pred"], torch.sigmoid(target)).item()
+        target = target_logit(x) if target_logit is not None else None
+        if target is not None:
+            assert target.shape == original["logits"].shape
+            assert torch.isfinite(target).all()
+        truth_output = (torch.sigmoid(target) if target is not None
+                        else target_output)
+        if truth_output is not None:
+            assert truth_output.shape == original["pred"].shape
+            pred_loss = F.mse_loss(original["pred"], truth_output).item()
+        else:
+            pred_loss = None
         results = []
         for i, j in combinations(range(x.shape[1]), 2):
             worlds = _four_worlds(x, donor, i, j)
@@ -75,16 +83,25 @@ def audit_pairwise_responsibility(adapter, x, donor, target_logit,
                                  communication=communication)
                 for z in worlds
             ]
-            truth = [target_logit(z) for z in worlds]
+            truth = ([target_logit(z) for z in worlds]
+                     if target_logit is not None else None)
             delta = scores[0]["logits"] - scores[1]["logits"] - scores[2]["logits"] + scores[3]["logits"]
             delta_module = (scores[0]["contributions"] - scores[1]["contributions"]
                             - scores[2]["contributions"] + scores[3]["contributions"])
-            delta_target = truth[0] - truth[1] - truth[2] + truth[3]
+            delta_target = (truth[0] - truth[1] - truth[2] + truth[3]
+                            if truth is not None else None)
             assert torch.allclose(delta_module.sum(1), delta, atol=6e-6, rtol=2e-5)
-            true_energy = delta_target.square().mean().item()
+            true_energy = (delta_target.square().mean().item()
+                           if delta_target is not None else None)
             model_energy = delta.square().mean().item()
-            error_energy = (delta - delta_target).square().mean().item()
-            if true_energy > epsilon:
+            error_energy = ((delta - delta_target).square().mean().item()
+                            if delta_target is not None else None)
+            if model_energy > epsilon:
+                model_share = ((delta_module * delta[:, None]).mean(dim=(0, 2))
+                               / model_energy).cpu().tolist()
+            else:
+                model_share = None
+            if true_energy is not None and true_energy > epsilon:
                 projection = (delta_module * delta_target[:, None]).mean(dim=(0, 2)) / true_energy
                 signed_share = projection.cpu().tolist()
                 target_reconstruction = float((delta * delta_target).mean().item() / true_energy)
@@ -93,15 +110,18 @@ def audit_pairwise_responsibility(adapter, x, donor, target_logit,
                 target_reconstruction = None
             results.append({
                 "pair": [i, j],
-                "target_interaction_rms": true_energy ** 0.5,
+                "target_interaction_rms": (true_energy ** 0.5
+                                           if true_energy is not None else None),
                 "learned_interaction_rms": model_energy ** 0.5,
-                "interaction_error_rms": error_energy ** 0.5,
+                "interaction_error_rms": (error_energy ** 0.5
+                                          if error_energy is not None else None),
+                "model_aligned_signed_module_projection": model_share,
                 "module_interaction_rms": delta_module.square().mean(dim=(0, 2)).sqrt().cpu().tolist(),
                 "target_aligned_signed_module_projection": signed_share,
                 "target_aligned_total_projection": target_reconstruction,
             })
         output = {
-            "prediction_mse": float(pred_loss),
+            "prediction_mse": (float(pred_loss) if pred_loss is not None else None),
             "communication_enabled": communication,
             "available_module_indices": ([i for i in range(adapter.num_modules)]
                                          if available is None else available.nonzero().flatten().tolist()),
