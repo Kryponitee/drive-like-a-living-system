@@ -42,6 +42,21 @@ def scene_spec(seed, mode):
     }
 
 
+def assert_matched_pulse_sham_spec(seed):
+    """Falsifiable task-contract check before any teacher or policy execution."""
+    pulse = scene_spec(seed, "pulse")
+    sham = scene_spec(seed, "sham")
+    mild = scene_spec(seed, "mild")
+    for other in (sham, mild):
+        assert pulse["center_gap_m"] == other["center_gap_m"]
+        assert pulse["switch_steps"] == other["switch_steps"]
+        assert pulse["brake_start_step"] == other["brake_start_step"]
+        for phase in (0, 1, 3):
+            assert pulse["targets_mps"][phase] == other["targets_mps"][phase]
+    assert pulse["targets_mps"][2] < sham["targets_mps"][2]
+    return True
+
+
 class D4TrafficManager(BaseManager):
     def __init__(self):
         super().__init__()
