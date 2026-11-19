@@ -84,7 +84,7 @@ jobs:
             fi
           done
           test "$failed" = 0
-      - name: Analyze recoverability: safe arrivals with and without privileged intervention
+      - name: "Analyze recoverability: safe arrivals with and without privileged intervention"
         shell: bash
         run: |
           set -euo pipefail
@@ -115,11 +115,7 @@ jobs:
                   "takeover_worsens_previously_safe":sum(
                       r["baseline_safe_arrival"] and not r["safe_arrival"] for r in records),
                   "mean_takeover_min_surface_gap_m":sum(r["min_surface_gap_m"] for r in records)/len(records),
-                  "by_seed":{str(seed):{
-                      "baseline_safe":sum(r["baseline_safe_arrival"] for r in records if r["seed"]//0==0) if False else None
-                  } for seed in ()},
               }
-              del groups[variant]["by_seed"]
           result={
               "stage":"D4 exact-prefix post-emergency takeover recoverability",
               "cases":108,"data_id":"d4-dynamic-follow-v1-44481405397",
