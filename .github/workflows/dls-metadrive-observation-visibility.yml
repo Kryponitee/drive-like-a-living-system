@@ -1,0 +1,55 @@
+name: DLS controlled-lead observation visibility gate
+
+on:
+  push:
+    paths:
+      - .github/workflows/dls-metadrive-observation-visibility.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: dls-metadrive-observation-visibility
+  cancel-in-progress: false
+
+jobs:
+  validate:
+    runs-on: [self-hosted, Linux, X64]
+    timeout-minutes: 15
+    env:
+      ROOT: /mnt/datasets/lxb/dls
+      DLS_ENV: /home/ps/miniconda3/envs/dls-p0
+      TMPDIR: /mnt/datasets/lxb/dls/tmp
+      XDG_CACHE_HOME: /mnt/datasets/lxb/dls/cache/xdg
+      PYTHONNOUSERSITE: "1"
+      OMP_NUM_THREADS: "1"
+      OPENBLAS_NUM_THREADS: "1"
+      MKL_NUM_THREADS: "1"
+    steps:
+      - name: Verify prerequisites
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(findmnt -n -o TARGET -T "$ROOT")" = "/mnt/datasets"
+          test ! -e "$ROOT/reports/d1-longitudinal-v1-44117653285/dynamic-follow-v2/observation-visibility-seed41001.json"
+      - name: Fetch code and run physically matched observation comparison
+        shell: bash
+        run: |
+          set -euo pipefail
+          WORK="$ROOT/tmp/dls-visibility-${GITHUB_RUN_ID}"
+          mkdir -p "$WORK/src" "$WORK/scripts"
+          for path in src/dls_longitudinal_motor.py src/dls_dual_pedal_adapter.py scripts/dls_metadrive_controlled_lead_smoke.py scripts/dls_metadrive_dynamic_following_v2.py scripts/dls_metadrive_observation_visibility_gate.py; do
+            RAW="https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/${GITHUB_SHA}/$path"
+            ok=0
+            for url in "https://gh-proxy.com/$RAW" "https://ghproxy.net/$RAW" "$RAW"; do
+              if curl -fLsS --connect-timeout 10 --max-time 60 "$url" -o "$WORK/$path"; then ok=1; break; fi
+            done
+            test "$ok" = 1
+            "$DLS_ENV/bin/python" -m py_compile "$WORK/$path"
+          done
+          "$DLS_ENV/bin/python" "$WORK/scripts/dls_metadrive_observation_visibility_gate.py" \
+            --seed 41001 \
+            --output "$ROOT/reports/d1-longitudinal-v1-44117653285/dynamic-follow-v2/observation-visibility-seed41001.json"
+          printf '%s\n' "## MetaDrive real-observation visibility gate" >> "$GITHUB_STEP_SUMMARY"
+          printf '%s\n' "Same ego actions and first70 steps; verified controlled lead appears in 259D vector and physical braking changes observation." >> "$GITHUB_STEP_SUMMARY"
