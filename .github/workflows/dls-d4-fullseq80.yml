@@ -1,0 +1,150 @@
+name: DLS D4 full-episode recurrent 80-epoch learning audit
+
+on:
+  push:
+    paths:
+      - .github/workflows/dls-d4-fullseq80.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: dls-d4-fullseq80
+  cancel-in-progress: false
+
+jobs:
+  evaluate:
+    runs-on: [self-hosted, Linux, X64]
+    timeout-minutes: 120
+    env:
+      ROOT: /mnt/datasets/lxb/dls
+      PY: /home/ps/miniconda3/envs/dls-p0/bin/python
+      TMPDIR: /mnt/datasets/lxb/dls/tmp
+      XDG_CACHE_HOME: /mnt/datasets/lxb/dls/cache/xdg
+      PYTHONNOUSERSITE: "1"
+      OMP_NUM_THREADS: "1"
+      OPENBLAS_NUM_THREADS: "1"
+      MKL_NUM_THREADS: "1"
+      NUMEXPR_NUM_THREADS: "1"
+      DATA_ID: d4-dynamic-follow-v1-44481405397
+    steps:
+      - name: Verify exact D4 train val holdout and frozen 20-epoch science baseline
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(findmnt -n -o TARGET -T "$ROOT")" = "/mnt/datasets"
+          test -s "$ROOT/reports/$DATA_ID/d4-overview.json"
+          test -s "$ROOT/reports/$DATA_ID/d4-outcome-meaning-audit.json"
+          test -s "$ROOT/reports/$DATA_ID/d4-budget80-overview.json"
+          test -s "$ROOT/reports/$DATA_ID/d4-budget80-outcome-audit.json"
+          test -s "$ROOT/reports/$DATA_ID/holdout-privileged-feasibility.json"
+          test -s "$ROOT/demonstrations/$DATA_ID/train.npz"
+          test -s "$ROOT/demonstrations/$DATA_ID/val.npz"
+          test ! -e "$ROOT/reports/$DATA_ID/d4-fullseq80-overview.json"
+          test ! -e "$ROOT/reports/$DATA_ID/d4-fullseq80-outcome-audit.json"
+          for variant in A B C; do
+            for seed in 42 43 44; do
+              test -s "$ROOT/checkpoints/$DATA_ID/$variant-seed$seed.pt"
+              test ! -e "$ROOT/checkpoints/$DATA_ID/full-seq80/$variant-seed$seed.pt"
+            done
+          done
+          "$PY" - <<'PY'
+          import torch
+          assert torch.cuda.is_available()
+          print("GPU available",torch.cuda.device_count())
+          PY
+      - name: Fetch pinned trainer evaluator and aggregator; reuse existing D4 data untouched
+        shell: bash
+        run: |
+          set -euo pipefail
+          WORK="$ROOT/tmp/dls-d4-fullseq80-${GITHUB_RUN_ID}"
+          mkdir -p "$WORK/src" "$WORK/scripts"
+          for path in src/dls_dual_pedal_adapter.py src/dls_longitudinal_motor.py src/dls_d4_following_scene.py scripts/dls_d4_bc_fullseq80.py scripts/dls_d4_eval_fullseq80.py scripts/dls_d4_aggregate_fullseq80.py scripts/dls_d4_outcome_audit.py; do
+            RAW="https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/${GITHUB_SHA}/$path"
+            ok=0
+            for url in "https://gh-proxy.com/$RAW" "https://ghproxy.net/$RAW" "$RAW"; do
+              if curl -fLsS --connect-timeout 10 --max-time 90 "$url" -o "$WORK/$path"; then ok=1; break; fi
+            done
+            test "$ok" = 1
+            "$PY" -m py_compile "$WORK/$path"
+            sha256sum "$WORK/$path"
+          done
+      - name: Train original architectures with same data complete recurrent episodes instead of 40-step hidden resets
+        shell: bash
+        run: |
+          set -euo pipefail
+          WORK="$ROOT/tmp/dls-d4-fullseq80-${GITHUB_RUN_ID}"
+          GPUS="$("$PY" -c 'import torch; print(torch.cuda.device_count())')"
+          test "$GPUS" -gt 0
+          declare -a pids=()
+          declare -a names=()
+          idx=0
+          for variant in A B C; do
+            for seed in 42 43 44; do
+              name="$variant-seed$seed"
+              gpu=$((idx%GPUS))
+              "$PY" "$WORK/scripts/dls_d4_bc_fullseq80.py" --variant "$variant" --seed "$seed" --gpu "$gpu" --data-id "$DATA_ID" > "$WORK/train-$name.log" 2>&1 &
+              pids+=("$!")
+              names+=("$name")
+              idx=$((idx+1))
+            done
+          done
+          failed=0
+          for i in "${!pids[@]}"; do
+            if wait "${pids[$i]}"; then
+              echo "TRAIN80 PASS ${names[$i]}"
+              tail -5 "$WORK/train-${names[$i]}.log"
+            else
+              echo "TRAIN80 FAIL ${names[$i]}"
+              tail -100 "$WORK/train-${names[$i]}.log"
+              failed=1
+            fi
+          done
+          test "$failed" -eq 0
+      - name: Run same heldout physical scenes and message blockade for frozen 80-epoch models
+        shell: bash
+        run: |
+          set -euo pipefail
+          WORK="$ROOT/tmp/dls-d4-fullseq80-${GITHUB_RUN_ID}"
+          declare -a pids=()
+          declare -a names=()
+          for variant in A B C; do
+            for seed in 42 43 44; do
+              name="$variant-seed$seed"
+              "$PY" "$WORK/scripts/dls_d4_eval_fullseq80.py" --variant "$variant" --seed "$seed" --data-id "$DATA_ID" > "$WORK/eval-$name.log" 2>&1 &
+              pids+=("$!")
+              names+=("$name")
+            done
+          done
+          failed=0
+          for i in "${!pids[@]}"; do
+            if wait "${pids[$i]}"; then
+              echo "EVAL80 PASS ${names[$i]}"
+              tail -5 "$WORK/eval-${names[$i]}.log"
+            else
+              echo "EVAL80 FAIL ${names[$i]}"
+              tail -100 "$WORK/eval-${names[$i]}.log"
+              failed=1
+            fi
+          done
+          test "$failed" -eq 0
+      - name: Aggregate identical test comparisons and correct for collision-arrival overlap
+        shell: bash
+        run: |
+          set -euo pipefail
+          WORK="$ROOT/tmp/dls-d4-fullseq80-${GITHUB_RUN_ID}"
+          "$PY" "$WORK/scripts/dls_d4_aggregate_fullseq80.py" --data-id "$DATA_ID"
+          "$PY" "$WORK/scripts/dls_d4_outcome_audit.py" --data-id "$DATA_ID" \
+            --eval-subdir closed-loop-fullseq80 \
+            --output-name d4-fullseq80-outcome-audit.json
+          test -s "$ROOT/reports/$DATA_ID/d4-fullseq80-overview.json"
+          test -s "$ROOT/reports/$DATA_ID/d4-fullseq80-outcome-audit.json"
+          {
+            printf '%s\n' "## DLS D4 80-epoch budget extension"
+            printf '%s\n' "- Same D4 training, validation and heldout scenes; same A/B/C parameter count and inputs"
+            printf '%s\n' "- Only recurrent training horizon changed: 40-step chunks to full episode, same 80 epochs, 9 new checkpoints"
+            printf '%s\n' "- 252 matched heldout closed-loop cases plus post-brake C peer-block counterfactual"
+            printf '%s\n' "- Reports under $ROOT/reports/$DATA_ID/d4-fullseq80-overview.json"
+            printf '%s\n' "- Original 20-epoch checkpoints preserved and not modified"
+          } >> "$GITHUB_STEP_SUMMARY"
