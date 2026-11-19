@@ -154,3 +154,5 @@ jobs:
             printf '%s\n' "- Reports: $ROOT/reports/$DATA_ID/d4-overview.json"
             printf '%s\n' "- Original D1/D3/FRA checkpoints and data remain unchanged"
           } >> "$GITHUB_STEP_SUMMARY"
+
+# D4 protocol v1 paired-randomness correction; full rerun with fresh unique dataset ID.
