@@ -12,7 +12,8 @@ import torch
 
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]/"src"))
 from dls_d4_following_scene import (
-    D4FollowingEnv,D4TrafficManager,MAX_STEPS,make_env,physical_gap,scene_spec)
+    D4FollowingEnv,D4TrafficManager,MAX_STEPS,make_env,physical_gap,scene_spec,
+    assert_matched_pulse_sham_spec)
 from dls_dual_pedal_adapter import install_dual_pedal_adapter
 from dls_longitudinal_motor import LocalMotorController,model_info
 
@@ -128,6 +129,7 @@ def main():
     experiments=[]
     started=time.monotonic()
     for seed in TEST_SEEDS:
+        assert assert_matched_pulse_sham_spec(seed)
         sham=rollout(model,a.variant,mean,std,seed,"sham")
         pulse=rollout(model,a.variant,mean,std,seed,"pulse")
         sham_pulse_matched=verify_matching(sham,pulse)
