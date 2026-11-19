@@ -1,0 +1,158 @@
+name: DLS functional responsibility audit - calibrated counterfactuals
+
+on:
+  push:
+    paths:
+      - .github/workflows/dls-functional-responsibility.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: dls-functional-responsibility-v1
+  cancel-in-progress: false
+
+jobs:
+  calibrated-audit:
+    runs-on: [self-hosted, Linux, X64]
+    timeout-minutes: 45
+    env:
+      DLS_ROOT: /mnt/datasets/lxb/dls
+      DLS_ENV: /home/ps/miniconda3/envs/dls-p0
+      PYTHONNOUSERSITE: "1"
+      OMP_NUM_THREADS: "1"
+      OPENBLAS_NUM_THREADS: "1"
+      MKL_NUM_THREADS: "1"
+      NUMEXPR_NUM_THREADS: "1"
+    steps:
+      - name: Verify mounted data root and installed dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(findmnt -n -o TARGET -T "$DLS_ROOT")" = "/mnt/datasets"
+          test -x "$DLS_ENV/bin/python"
+          "$DLS_ENV/bin/python" -c "import torch, scipy; print(torch.__version__,scipy.__version__)"
+          test ! -e "$DLS_ROOT/reports/functional-responsibility-v1/aggregate.json"
+          for seed in 7 8 9; do
+            test ! -e "$DLS_ROOT/reports/functional-responsibility-v1/seed$seed.json"
+          done
+      - name: Fetch and compile pinned audit source
+        shell: bash
+        run: |
+          set -euo pipefail
+          WORK="$DLS_ROOT/tmp/dls-responsibility-${GITHUB_RUN_ID}"
+          mkdir -p "$WORK/src" "$WORK/scripts"
+          for path in src/dls_computational_responsibility.py src/dls_functional_responsibility.py scripts/dls_functional_responsibility_experiment.py; do
+            RAW="https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/${GITHUB_SHA}/$path"
+            ok=0
+            for url in "https://gh-proxy.com/$RAW" "https://ghproxy.net/$RAW" "$RAW"; do
+              if curl -fLsS --connect-timeout 10 --max-time 60 "$url" -o "$WORK/$path"; then
+                ok=1
+                break
+              fi
+            done
+            test "$ok" = 1
+            "$DLS_ENV/bin/python" -m py_compile "$WORK/$path"
+            sha256sum "$WORK/$path"
+          done
+      - name: Test exact positive negative mathematical oracles and train models
+        shell: bash
+        run: |
+          set -euo pipefail
+          WORK="$DLS_ROOT/tmp/dls-responsibility-${GITHUB_RUN_ID}"
+          REPORT="$DLS_ROOT/reports/functional-responsibility-v1"
+          CKPT="$DLS_ROOT/checkpoints/functional-responsibility-v1"
+          mkdir -p "$REPORT" "$CKPT"
+          declare -a pids=()
+          for seed in 7 8 9; do
+            "$DLS_ENV/bin/python" "$WORK/scripts/dls_functional_responsibility_experiment.py" \
+               --seed "$seed" --output "$REPORT/seed$seed.json" \
+               --checkpoint-dir "$CKPT" > "$WORK/seed$seed.log" 2>&1 &
+            pids+=("$!")
+          done
+          failed=0
+          i=0
+          for seed in 7 8 9; do
+            if wait "${pids[$i]}"; then
+              echo "PASS seed $seed"
+              grep -E "PASS exact|assay seed=|PASS: positive" "$WORK/seed$seed.log"
+            else
+              echo "FAIL seed $seed"
+              tail -140 "$WORK/seed$seed.log"
+              failed=1
+            fi
+            i=$((i+1))
+          done
+          test "$failed" = 0
+      - name: Verify protocol, aggregate attribution measures and save science gates
+        shell: bash
+        run: |
+          set -euo pipefail
+          "$DLS_ENV/bin/python" - <<'PY'
+          import json
+          from pathlib import Path
+          import numpy as np
+          root=Path("/mnt/datasets/lxb/dls")
+          report=root/"reports"/"functional-responsibility-v1"
+          out=report/"aggregate.json"
+          assert not out.exists()
+          rows=[]
+          for seed in (7,8,9):
+              r=json.loads((report/f"seed{seed}.json").read_text())
+              assert r["seed"]==seed and len(r["rows"])==4
+              assert r["oracle_calibration"]["interaction"]["max_interaction_error_rms"]<1e-5
+              assert r["oracle_calibration"]["additive"]["max_interaction_error_rms"]<1e-5
+              for row in r["rows"]:
+                  assert Path(row["checkpoint"]).is_file()
+                  assert len(row["four_single_module_faults_reassigned"])==4
+                  for z in row["four_single_module_faults_reassigned"]:
+                      assert np.isfinite(z["mse"])
+                  rows.append(row)
+          assert len(rows)==12
+          groups={}
+          for key in ("interaction-no_comm","interaction-comm","interaction-comm-fault_train","additive-comm"):
+              task="additive" if key.startswith("additive") else "interaction"
+              comm=key!="interaction-no_comm"
+              fault=key=="interaction-comm-fault_train"
+              group=[r for r in rows if r["task"]==task and r["train_with_communication"]==comm and r["fault_training"]==fault]
+              assert len(group)==3,key
+              groups[key]={
+                  "mean_healthy_test_mse":float(np.mean([r["healthy"]["mse"] for r in group])),
+                  "mean_comm_block_test_mse":float(np.mean([r["communication_blocked"]["mse"] for r in group])),
+                  "mean_one_module_fault_test_mse":float(np.mean([r["mean_fault_mse"] for r in group])),
+                  "per_seed":[{
+                      "seed":r["seed"],
+                      "healthy":r["healthy"]["mse"],
+                      "fault":r["mean_fault_mse"],
+                      "owners":r["healthy"]["feature_owners"],
+                      "pair_alignment":r["healthy"]["pair_total_alignment"],
+                      "module_alignment":r["healthy"]["pair_module_alignment"],
+                      "wrong_pair_max_interaction_rms":r["healthy"]["wrong_pair_max_interaction_rms"],
+                  } for r in group],
+              }
+          p=groups["interaction-comm"]["mean_healthy_test_mse"]
+          n=groups["interaction-no_comm"]["mean_healthy_test_mse"]
+          f=groups["interaction-comm-fault_train"]["mean_one_module_fault_test_mse"]
+          nf=groups["interaction-comm"]["mean_one_module_fault_test_mse"]
+          gates={
+              "oracle_positive_and_negative_calibration_pass":True,
+              "trained_interaction_communication_better_than_no_comm":p<n,
+              "fault_training_mean_fault_loss_improves":f<nf,
+              "fault_training_mean_healthy_loss_tradeoff":groups["interaction-comm-fault_train"]["mean_healthy_test_mse"]>p,
+          }
+          result={
+              "stage":"DLS functional responsibility v1",
+              "scope":"static synthetic interaction and additive, NOT closed-loop motor coordination",
+              "n_models":12,
+              "model_seeds":[7,8,9],
+              "science_gates":gates,
+              "results":groups,
+              "warning":"identification is module-coordinate-relative and input counterfactuals are valid ONLY for independent synthetic variables",
+          }
+          out.write_text(json.dumps(result,ensure_ascii=False,indent=2))
+          print(json.dumps(result,ensure_ascii=False,indent=2),flush=True)
+          PY
+          printf '%s\n' "## DLS functional responsibility assay" >> "$GITHUB_STEP_SUMMARY"
+          printf '%s\n' "12 models across 3 seeds; exact oracle tests, true-vs-false interaction, module attribution, communication and fault comparisons." >> "$GITHUB_STEP_SUMMARY"
+          printf '%s\n' "Results: /mnt/datasets/lxb/dls/reports/functional-responsibility-v1/aggregate.json" >> "$GITHUB_STEP_SUMMARY"
