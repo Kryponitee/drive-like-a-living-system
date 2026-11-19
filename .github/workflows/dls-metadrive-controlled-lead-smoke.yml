@@ -1,0 +1,70 @@
+name: DLS MetaDrive physically controlled lead feasibility
+
+on:
+  push:
+    paths:
+      - .github/workflows/dls-metadrive-controlled-lead-smoke.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: dls-metadrive-controlled-lead-smoke
+  cancel-in-progress: false
+
+jobs:
+  physics-gate:
+    runs-on: [self-hosted, Linux, X64]
+    timeout-minutes: 20
+    env:
+      ROOT: /mnt/datasets/lxb/dls
+      DLS_ENV: /home/ps/miniconda3/envs/dls-p0
+      TMPDIR: /mnt/datasets/lxb/dls/tmp
+      XDG_CACHE_HOME: /mnt/datasets/lxb/dls/cache/xdg
+      PYTHONNOUSERSITE: "1"
+      OMP_NUM_THREADS: "1"
+      OPENBLAS_NUM_THREADS: "1"
+      MKL_NUM_THREADS: "1"
+    steps:
+      - name: Verify runtime and clean scene report
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(findmnt -n -o TARGET -T "$ROOT")" = "/mnt/datasets"
+          test -x "$DLS_ENV/bin/python"
+          test ! -e "$ROOT/reports/controlled-lead-v0/physics-seed41000.json"
+      - name: Fetch pinned MetaDrive controls
+        shell: bash
+        run: |
+          set -euo pipefail
+          WORK="$ROOT/tmp/dls-controlled-lead-${GITHUB_RUN_ID}"
+          mkdir -p "$WORK/src" "$WORK/scripts"
+          for path in src/dls_dual_pedal_adapter.py scripts/dls_metadrive_controlled_lead_smoke.py; do
+            RAW="https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/${GITHUB_SHA}/$path"
+            ok=0
+            for url in "https://gh-proxy.com/$RAW" "https://ghproxy.net/$RAW" "$RAW"; do
+              if curl -fLsS --connect-timeout 10 --max-time 60 "$url" -o "$WORK/$path"; then ok=1; break; fi
+            done
+            test "$ok" = 1
+            "$DLS_ENV/bin/python" -m py_compile "$WORK/$path"
+          done
+      - name: Run physical lead acceleration braking and recovery schedule
+        shell: bash
+        run: |
+          set -euo pipefail
+          WORK="$ROOT/tmp/dls-controlled-lead-${GITHUB_RUN_ID}"
+          "$DLS_ENV/bin/python" "$WORK/scripts/dls_metadrive_controlled_lead_smoke.py" \
+            --seed 41000 --max-steps 180 \
+            --output "$ROOT/reports/controlled-lead-v0/physics-seed41000.json"
+          "$DLS_ENV/bin/python" - <<'PY'
+          import json
+          from pathlib import Path
+          p=Path("/mnt/datasets/lxb/dls/reports/controlled-lead-v0/physics-seed41000.json")
+          x=json.loads(p.read_text())
+          assert x["n_steps"]>90 and x["phase_reached"]>=1
+          assert x["lead_speed_kmh_range"][1]-x["lead_speed_kmh_range"][0]>6
+          print("VERIFIED physical script",p)
+          PY
+          printf '%s\n' "## Dynamic following physical feasibility" >> "$GITHUB_STEP_SUMMARY"
+          printf '%s\n' "Controlled lead model has nontrivial measured speed changes in actual MetaDrive physics; recorded physical distances and phase labels." >> "$GITHUB_STEP_SUMMARY"
