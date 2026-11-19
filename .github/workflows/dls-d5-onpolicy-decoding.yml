@@ -1,0 +1,72 @@
+name: DLS D5 on-policy emergency-state sensor decoding gate
+
+on:
+  push:
+    paths:
+      - .github/workflows/dls-d5-onpolicy-decoding.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: dls-d5-onpolicy-decoding
+  cancel-in-progress: false
+
+jobs:
+  interpret:
+    runs-on: [self-hosted, Linux, X64]
+    timeout-minutes: 20
+    env:
+      ROOT: /mnt/datasets/lxb/dls
+      PY: /home/ps/miniconda3/envs/dls-p0/bin/python
+      TMPDIR: /mnt/datasets/lxb/dls/tmp
+      XDG_CACHE_HOME: /mnt/datasets/lxb/dls/cache/xdg
+      PYTHONNOUSERSITE: "1"
+      OMP_NUM_THREADS: "1"
+      OPENBLAS_NUM_THREADS: "1"
+      MKL_NUM_THREADS: "1"
+      NUMEXPR_NUM_THREADS: "1"
+      DATA_ID: d4-dynamic-follow-v1-44481405397
+    steps:
+      - name: Confirm D5 sensor/true-state frozen data and original report
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(findmnt -n -o TARGET -T "$ROOT")" = "/mnt/datasets"
+          BASE="$ROOT/reports/$DATA_ID/d5-observability-v1"
+          test -s "$BASE/sensor-decodability-report.json"
+          for stage in train val test onpolicy-A onpolicy-B onpolicy-C; do
+            test -s "$BASE/$stage.npz"
+            test -s "$BASE/$stage.json"
+          done
+          test ! -e "$BASE/onpolicy-decoding-shift-diagnostic.json"
+          "$PY" - <<'PY'
+          import torch
+          assert torch.cuda.is_available()
+          PY
+      - name: Fetch SHA pinned pure data analysis and onpolicy diagnostic
+        shell: bash
+        run: |
+          set -euo pipefail
+          WORK="$ROOT/tmp/dls-d5-onpolicy-${GITHUB_RUN_ID}"
+          mkdir -p "$WORK/scripts"
+          for path in scripts/dls_d5_sensor_probe.py scripts/dls_d5_probe_onpolicy_refit.py; do
+            RAW="https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/${GITHUB_SHA}/$path"
+            ok=0
+            for url in "https://gh-proxy.com/$RAW" "https://ghproxy.net/$RAW" "$RAW"; do
+              if curl -fLsS --connect-timeout 10 --max-time 90 "$url" -o "$WORK/$path"; then ok=1; break; fi
+            done
+            test "$ok" = 1
+            "$PY" -m py_compile "$WORK/$path"
+          done
+      - name: Train scientific observable-state probes and verify disjoint scene test
+        shell: bash
+        run: |
+          set -euo pipefail
+          WORK="$ROOT/tmp/dls-d5-onpolicy-${GITHUB_RUN_ID}"
+          "$PY" "$WORK/scripts/dls_d5_probe_onpolicy_refit.py"
+          test -s "$ROOT/reports/$DATA_ID/d5-observability-v1/onpolicy-decoding-shift-diagnostic.json"
+          printf '%s\n' "## DLS D5 recoverable observation in on-policy emergency" >> "$GITHUB_STEP_SUMMARY"
+          printf '%s\n' "Disjoint 6 train, 2 validation, 4 heldout physical scene seeds across A/B/C, no motor policy changes." >> "$GITHUB_STEP_SUMMARY"
+          printf '%s\n' "Compare time+true ego speed negative control to 259D instantaneous and three-frame temporal decoding." >> "$GITHUB_STEP_SUMMARY"
