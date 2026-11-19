@@ -21,8 +21,12 @@ def scene_spec(seed, mode):
     gap = float(rng.uniform(16., 25.))
     speed0 = float(rng.uniform(4.5, 7.0))
     speed1 = float(rng.uniform(6.0, 9.0))
-    speed2 = (float(rng.uniform(0.0, 1.5)) if mode == "pulse"
-              else float(rng.uniform(3.0, 5.0)) if mode == "mild"
+    # Consume exactly one common random draw in *every* mode.
+    # Otherwise sham and pulse would have different subsequent phase timings.
+    # This is essential for a valid same-history braking counterfactual.
+    draw = float(rng.uniform())
+    speed2 = (1.5 * draw if mode == "pulse"
+              else 3.0 + 2.0 * draw if mode == "mild"
               else speed1)
     speed3 = float(rng.uniform(5.0, 8.0))
     t1 = int(rng.integers(18, 30))
