@@ -1,0 +1,144 @@
+name: DLS D6 pilot same-budget replay versus on-policy teacher labels (A)
+
+on:
+  push:
+    paths:
+      - .github/workflows/dls-d6-a-coverage-pilot.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: dls-d6-a-coverage-pilot
+  cancel-in-progress: false
+
+jobs:
+  compare:
+    runs-on: [self-hosted, Linux, X64]
+    timeout-minutes: 65
+    env:
+      ROOT: /mnt/datasets/lxb/dls
+      DATA_ID: d4-dynamic-follow-v1-44481405397
+      PY: /home/ps/miniconda3/envs/dls-p0/bin/python
+      TMPDIR: /mnt/datasets/lxb/dls/tmp
+      XDG_CACHE_HOME: /mnt/datasets/lxb/dls/cache/xdg
+      PYTHONNOUSERSITE: "1"
+      OMP_NUM_THREADS: "1"
+      OPENBLAS_NUM_THREADS: "1"
+      MKL_NUM_THREADS: "1"
+      NUMEXPR_NUM_THREADS: "1"
+    steps:
+      - name: Verify D4/D5 evidence, input data and unchanged checkpoints
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(findmnt -n -o TARGET -T "$ROOT")" = "/mnt/datasets"
+          test -s "$ROOT/reports/$DATA_ID/d5-observability-v1/sensor-decodability-report.json"
+          test -s "$ROOT/reports/$DATA_ID/d5-observability-v1/onpolicy-decoding-shift-diagnostic.json"
+          test -s "$ROOT/demonstrations/$DATA_ID/train.npz"
+          test -s "$ROOT/demonstrations/$DATA_ID/val.npz"
+          test ! -e "$ROOT/demonstrations/$DATA_ID/d6-online-coverage-v0.npz"
+          test ! -e "$ROOT/reports/$DATA_ID/d6-a-pilot/coverage-vs-replay-summary.json"
+          for variant in A B C; do
+            test -s "$ROOT/checkpoints/$DATA_ID/full-seq80/$variant-seed42.pt"
+          done
+          "$PY" - <<'PY'
+          import torch
+          print("GPU count",torch.cuda.device_count())
+          assert torch.cuda.is_available()
+          PY
+      - name: Load pinned D4 physical environment and D6 experimental source
+        shell: bash
+        run: |
+          set -euo pipefail
+          WORK="$ROOT/tmp/dls-d6-pilot-${GITHUB_RUN_ID}"
+          mkdir -p "$WORK/src" "$WORK/scripts"
+          for path in src/dls_dual_pedal_adapter.py src/dls_longitudinal_motor.py src/dls_d4_following_scene.py scripts/dls_d4_eval_fullseq80.py scripts/dls_d6_collect_student_states.py scripts/dls_d6_train_a_pilot.py scripts/dls_d6_eval_a_pilot.py scripts/dls_d6_aggregate_a_pilot.py; do
+            RAW="https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/${GITHUB_SHA}/$path"
+            ok=0
+            for url in "https://gh-proxy.com/$RAW" "https://ghproxy.net/$RAW" "$RAW"; do
+              if curl -fLsS --connect-timeout 10 --max-time 90 "$url" -o "$WORK/$path"; then ok=1; break; fi
+            done
+            test "$ok" = 1
+            "$PY" -m py_compile "$WORK/$path"
+            sha256sum "$WORK/$path"
+          done
+      - name: Generate 108 teacher-labelled real physical states from frozen A/B/C on new training seeds
+        shell: bash
+        run: |
+          set -euo pipefail
+          WORK="$ROOT/tmp/dls-d6-pilot-${GITHUB_RUN_ID}"
+          "$PY" "$WORK/scripts/dls_d6_collect_student_states.py"
+          test -s "$ROOT/demonstrations/$DATA_ID/d6-online-coverage-v0.npz"
+          test -s "$ROOT/reports/$DATA_ID/d6-online-coverage-v0/teacher-labelled-sample-metadata.json"
+      - name: Train six identical A-GRU networks with same initialization epochs and gradient update counts
+        shell: bash
+        run: |
+          set -euo pipefail
+          WORK="$ROOT/tmp/dls-d6-pilot-${GITHUB_RUN_ID}"
+          GPUS="$("$PY" -c 'import torch; print(torch.cuda.device_count())')"
+          test "$GPUS" -gt 0
+          declare -a pids=()
+          declare -a names=()
+          idx=0
+          for arm in replay onpolicy; do
+            for seed in 42 43 44; do
+              name="$arm-seed$seed"
+              gpu=$((idx%GPUS))
+              "$PY" "$WORK/scripts/dls_d6_train_a_pilot.py" --arm "$arm" --seed "$seed" --gpu "$gpu" > "$WORK/train-$name.log" 2>&1 &
+              pids+=("$!")
+              names+=("$name")
+              idx=$((idx+1))
+            done
+          done
+          failed=0
+          for i in "${!pids[@]}"; do
+            if wait "${pids[$i]}"; then
+              echo "D6 TRAIN PASS ${names[$i]}"
+              tail -6 "$WORK/train-${names[$i]}.log"
+            else
+              echo "D6 TRAIN FAIL ${names[$i]}"
+              tail -100 "$WORK/train-${names[$i]}.log"
+              failed=1
+            fi
+          done
+          test "$failed" = 0
+      - name: Run same physical pulse and sham on 12 heldout seeds per A model
+        shell: bash
+        run: |
+          set -euo pipefail
+          WORK="$ROOT/tmp/dls-d6-pilot-${GITHUB_RUN_ID}"
+          declare -a pids=()
+          declare -a names=()
+          for arm in replay onpolicy; do
+            for seed in 42 43 44; do
+              name="$arm-seed$seed"
+              "$PY" "$WORK/scripts/dls_d6_eval_a_pilot.py" --arm "$arm" --seed "$seed" > "$WORK/eval-$name.log" 2>&1 &
+              pids+=("$!")
+              names+=("$name")
+            done
+          done
+          failed=0
+          for i in "${!pids[@]}"; do
+            if wait "${pids[$i]}"; then
+              echo "D6 EVAL PASS ${names[$i]}"
+              tail -4 "$WORK/eval-${names[$i]}.log"
+            else
+              echo "D6 EVAL FAIL ${names[$i]}"
+              tail -100 "$WORK/eval-${names[$i]}.log"
+              failed=1
+            fi
+          done
+          test "$failed" = 0
+      - name: Compare paired safety and policy reaction, keep failures visible
+        shell: bash
+        run: |
+          set -euo pipefail
+          WORK="$ROOT/tmp/dls-d6-pilot-${GITHUB_RUN_ID}"
+          "$PY" "$WORK/scripts/dls_d6_aggregate_a_pilot.py"
+          test -s "$ROOT/reports/$DATA_ID/d6-a-pilot/coverage-vs-replay-summary.json"
+          printf '%s\n' "## D6 scientific data-coverage pilot" >> "$GITHUB_STEP_SUMMARY"
+          printf '%s\n' "A-GRU replay vs on-policy expert labels, 3 seeds, 80 epochs, same data example counts and optimizer updates, 144 heldout physical episodes." >> "$GITHUB_STEP_SUMMARY"
+          printf '%s\n' "Physically identical sham/lead-brake paired prefixes tested on each frozen model." >> "$GITHUB_STEP_SUMMARY"
+          printf '%s\n' "Report: $ROOT/reports/$DATA_ID/d6-a-pilot/coverage-vs-replay-summary.json" >> "$GITHUB_STEP_SUMMARY"
