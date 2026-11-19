@@ -4,7 +4,7 @@ import argparse, hashlib, json, os, sys, time
 from pathlib import Path
 import numpy as np
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]/"src"))
-from dls_d4_following_scene import collect_teacher_episode
+from dls_d4_following_scene import collect_teacher_episode,assert_matched_pulse_sham_spec
 
 ROOT=Path("/mnt/datasets/lxb/dls")
 SEEDS={"train":range(51000,51024),"val":range(61000,61008)}
@@ -22,6 +22,7 @@ def main():
     assert not out.exists() and not report.exists()
     xs=[];ys=[];offsets=[0];seeds=[];modes=[];events=[];records=[]
     for seed in SEEDS[a.split]:
+        assert assert_matched_pulse_sham_spec(seed)
         for mode in MODES:
             x,y,states,rec=collect_teacher_episode(seed,mode)
             assert rec["success"] and not rec["collision"] and not rec["out_of_road"],rec
