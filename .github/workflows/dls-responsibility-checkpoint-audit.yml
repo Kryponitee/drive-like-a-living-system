@@ -1,0 +1,93 @@
+name: DLS responsibility read-only checkpoint re-audit
+
+on:
+  push:
+    paths:
+      - .github/workflows/dls-responsibility-checkpoint-audit.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: dls-responsibility-checkpoint-audit
+  cancel-in-progress: false
+
+jobs:
+  probe:
+    runs-on: [self-hosted, Linux, X64]
+    timeout-minutes: 15
+    env:
+      DLS_ROOT: /mnt/datasets/lxb/dls
+      DLS_ENV: /home/ps/miniconda3/envs/dls-p0
+      OMP_NUM_THREADS: "1"
+      OPENBLAS_NUM_THREADS: "1"
+      MKL_NUM_THREADS: "1"
+      NUMEXPR_NUM_THREADS: "1"
+      PYTHONNOUSERSITE: "1"
+    steps:
+      - name: Verify existing checkpoints and read-only audit output locations
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(findmnt -n -o TARGET -T "$DLS_ROOT")" = "/mnt/datasets"
+          test -s "$DLS_ROOT/reports/functional-responsibility-v1/aggregate.json"
+          test -s "$DLS_ROOT/checkpoints/functional-responsibility-v1/interaction-comm1-fault0-seed7.pt"
+          test ! -e "$DLS_ROOT/reports/functional-responsibility-v1/probe-targetfree-seed7.json"
+          test ! -e "$DLS_ROOT/reports/functional-responsibility-v1/probe-oracle-seed7.json"
+
+      - name: Fetch pinned source
+        shell: bash
+        run: |
+          set -euo pipefail
+          WORK="$DLS_ROOT/tmp/dls-probe-${GITHUB_RUN_ID}"
+          mkdir -p "$WORK/src" "$WORK/scripts"
+          for path in src/dls_computational_responsibility.py src/dls_functional_responsibility.py scripts/dls_functional_responsibility_experiment.py scripts/dls_audit_responsibility_checkpoint.py; do
+            RAW="https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/${GITHUB_SHA}/$path"
+            ok=0
+            for url in "https://gh-proxy.com/$RAW" "https://ghproxy.net/$RAW" "$RAW"; do
+              if curl -fLsS --connect-timeout 10 --max-time 60 "$url" -o "$WORK/$path"; then ok=1; break; fi
+            done
+            test "$ok" = 1
+            "$DLS_ENV/bin/python" -m py_compile "$WORK/$path"
+          done
+
+      - name: Audit trained weights without teacher function and independently with oracle
+        shell: bash
+        run: |
+          set -euo pipefail
+          WORK="$DLS_ROOT/tmp/dls-probe-${GITHUB_RUN_ID}"
+          REPORT="$DLS_ROOT/reports/functional-responsibility-v1"
+          CKPT="$DLS_ROOT/checkpoints/functional-responsibility-v1/interaction-comm1-fault0-seed7.pt"
+          "$DLS_ENV/bin/python" "$WORK/scripts/dls_audit_responsibility_checkpoint.py" \
+             --checkpoint "$CKPT" --target none --output "$REPORT/probe-targetfree-seed7.json"
+          "$DLS_ENV/bin/python" "$WORK/scripts/dls_audit_responsibility_checkpoint.py" \
+             --checkpoint "$CKPT" --target oracle --output "$REPORT/probe-oracle-seed7.json"
+
+      - name: Verify identical model-side interaction scores irrespective of oracle
+        shell: bash
+        run: |
+          set -euo pipefail
+          "$DLS_ENV/bin/python" - <<'PY'
+          import json
+          from pathlib import Path
+          root=Path("/mnt/datasets/lxb/dls/reports/functional-responsibility-v1")
+          blind=json.loads((root/"probe-targetfree-seed7.json").read_text())
+          scored=json.loads((root/"probe-oracle-seed7.json").read_text())
+          reference=json.loads((root/"seed7.json").read_text())
+          original=next(z for z in reference["rows"] if z["task"]=="interaction"
+                        and z["train_with_communication"] and not z["fault_training"])
+          assert blind["target_mode"]=="none" and scored["target_mode"]=="oracle"
+          assert len(blind["single_fault_with_input_reallocation"])==4
+          assert abs(blind["healthy"]["prediction_mse"]-original["healthy"]["mse"])<1e-9
+          assert abs(scored["healthy"]["prediction_mse"]-original["healthy"]["mse"])<1e-9
+          for a,b in zip(blind["healthy"]["input_pairs"],scored["healthy"]["input_pairs"]):
+              assert a["pair"]==b["pair"]
+              assert abs(a["learned_interaction_rms"]-b["learned_interaction_rms"])<1e-9
+              assert a["target_interaction_rms"] is None
+              assert b["target_interaction_rms"] is not None
+              assert a["model_aligned_signed_module_projection"]==b["model_aligned_signed_module_projection"]
+          print("PASS: blind target-free attribution reproduces exact same trained-model interaction spectrum")
+          PY
+          printf '%s\n' "## Read-only responsibility diagnostic validated" >> "$GITHUB_STEP_SUMMARY"
+          printf '%s\n' "Model-side interaction and module assignment are identical with or without access to teacher formula." >> "$GITHUB_STEP_SUMMARY"
