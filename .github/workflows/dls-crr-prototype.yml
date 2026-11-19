@@ -1,0 +1,75 @@
+name: DLS computational responsibility primitive proof-of-concept
+
+on:
+  push:
+    paths:
+      - .github/workflows/dls-crr-prototype.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: dls-crr-prototype
+  cancel-in-progress: false
+
+jobs:
+  verify:
+    runs-on: [self-hosted, Linux, X64]
+    timeout-minutes: 25
+    env:
+      DLS_ENV: /home/ps/miniconda3/envs/dls-p0
+      ROOT: /mnt/datasets/lxb/dls
+      PYTHONNOUSERSITE: "1"
+      OMP_NUM_THREADS: "1"
+      OPENBLAS_NUM_THREADS: "1"
+      MKL_NUM_THREADS: "1"
+    steps:
+      - name: Verify dataset volume, python environment and source prerequisites
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(findmnt -n -o TARGET -T "$ROOT")" = "/mnt/datasets"
+          test -x "$DLS_ENV/bin/python"
+          "$DLS_ENV/bin/python" -c "import torch, scipy; print('torch',torch.__version__,'scipy',scipy.__version__)"
+      - name: Fetch pinned source files
+        shell: bash
+        run: |
+          set -euo pipefail
+          WORK="$ROOT/tmp/dls-crr-${GITHUB_RUN_ID}"
+          mkdir -p "$WORK/src" "$WORK/scripts"
+          for path in src/dls_computational_responsibility.py scripts/dls_crr_prototype_smoke.py; do
+            RAW="https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/${GITHUB_SHA}/$path"
+            ok=0
+            for url in "https://gh-proxy.com/$RAW" "https://ghproxy.net/$RAW" "$RAW"; do
+              if curl -fLsS --connect-timeout 10 --max-time 60 "$url" -o "$WORK/$path"; then
+                ok=1
+                break
+              fi
+            done
+            test "$ok" = 1
+            "$DLS_ENV/bin/python" -m py_compile "$WORK/$path"
+            sha256sum "$WORK/$path"
+          done
+      - name: Run interface tests, complementary computation and lesion rerouting pilot
+        shell: bash
+        run: |
+          set -euo pipefail
+          WORK="$ROOT/tmp/dls-crr-${GITHUB_RUN_ID}"
+          OUT="$ROOT/reports/crr-prototype-v0/run-${GITHUB_RUN_ID}.json"
+          test ! -e "$OUT"
+          "$DLS_ENV/bin/python" "$WORK/scripts/dls_crr_prototype_smoke.py" --output "$OUT"
+          test -s "$OUT"
+          "$DLS_ENV/bin/python" - "$OUT" <<'PY'
+          import json,sys
+          from pathlib import Path
+          r=json.loads(Path(sys.argv[1]).read_text())
+          assert len(r["results"])==5
+          assert all(z["test_healthy_mse"]>=0 for z in r["results"])
+          assert all(len(z["feature_owner_module_indices"])==4 for z in r["results"])
+          assert sum(z["fault_training"] for z in r["results"])==1
+          print("VERIFIED",Path(sys.argv[1]))
+          PY
+          printf '## DLS computational responsibility prototype v0\n\n' >> "$GITHUB_STEP_SUMMARY"
+          printf 'Unit checks passed. 5 synthetic toy runs (2 seeds x communication on/off, plus fault-training).\n\n' >> "$GITHUB_STEP_SUMMARY"
+          printf 'Report: %s\n' "$OUT" >> "$GITHUB_STEP_SUMMARY"
