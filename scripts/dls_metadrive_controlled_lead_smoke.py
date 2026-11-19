@@ -107,7 +107,7 @@ def run(seed,max_steps):
         obs,_=env.reset(seed=seed)
         ego=env.agent
         install_dual_pedal_adapter(ego,steering_controller=lambda _:0.0)
-        mgr=env.engine.traffic_manager
+        mgr=env.unwrapped.engine.traffic_manager
         assert isinstance(mgr,ScriptedLeadManager)
         mgr.attach_lead(ego,gap_m=26)
         for t in range(max_steps):
