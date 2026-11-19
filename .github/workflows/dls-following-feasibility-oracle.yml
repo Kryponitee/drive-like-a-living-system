@@ -59,3 +59,5 @@ jobs:
             --output "$ROOT/reports/d1-longitudinal-v1-44117653285/dynamic-follow-v2/privileged-physical-reference.json"
           printf '%s\n' "## Physical feasibility gate" >> "$GITHUB_STEP_SUMMARY"
           printf '%s\n' "Rule-based ACC reads privileged measured gap and leader speed, intentionally NOT a comparable learned controller; tests collision-free mobility possibility." >> "$GITHUB_STEP_SUMMARY"
+
+# Rerun with early termination recorded before assertions.
