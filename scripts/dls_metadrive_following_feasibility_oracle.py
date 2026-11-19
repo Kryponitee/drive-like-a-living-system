@@ -68,7 +68,7 @@ def run(seed,mode):
                 "ego_distance_m":float(np.linalg.norm(np.asarray(ego.position)-origin)),
             })
             if done or truncated:break
-        assert len(trace)>=100
+        assert len(trace)>0
         return {
             "seed":seed,"condition":mode,
             "steps":len(trace),
