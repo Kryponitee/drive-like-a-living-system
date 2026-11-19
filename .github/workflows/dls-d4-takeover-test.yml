@@ -1,0 +1,135 @@
+name: DLS D4 exact-prefix privileged post-brake recoverability test
+
+on:
+  push:
+    paths:
+      - .github/workflows/dls-d4-takeover-test.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: dls-d4-takeover-test
+  cancel-in-progress: false
+
+jobs:
+  takeover:
+    runs-on: [self-hosted, Linux, X64]
+    timeout-minutes: 45
+    env:
+      ROOT: /mnt/datasets/lxb/dls
+      PY: /home/ps/miniconda3/envs/dls-p0/bin/python
+      TMPDIR: /mnt/datasets/lxb/dls/tmp
+      XDG_CACHE_HOME: /mnt/datasets/lxb/dls/cache/xdg
+      PYTHONNOUSERSITE: "1"
+      OMP_NUM_THREADS: "1"
+      OPENBLAS_NUM_THREADS: "1"
+      MKL_NUM_THREADS: "1"
+    steps:
+      - name: Verify 80-epoch model physical-baseline checkpoints
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(findmnt -n -o TARGET -T "$ROOT")" = "/mnt/datasets"
+          BASE="$ROOT/reports/d4-dynamic-follow-v1-44481405397"
+          test -s "$BASE/d4-budget80-overview.json"
+          test -s "$BASE/d4-budget80-outcome-audit.json"
+          test ! -e "$BASE/takeover-budget80/aggregate.json"
+          for variant in A B C; do
+            for seed in 42 43 44; do
+              test -s "$BASE/closed-loop-budget80/$variant-seed$seed.json"
+              test ! -e "$BASE/takeover-budget80/$variant-seed$seed.json"
+            done
+          done
+      - name: Fetch pinned physical scene and exact-prefix takeover code
+        shell: bash
+        run: |
+          set -euo pipefail
+          WORK="$ROOT/tmp/dls-d4-takeover-${GITHUB_RUN_ID}"
+          mkdir -p "$WORK/src" "$WORK/scripts"
+          for path in src/dls_dual_pedal_adapter.py src/dls_longitudinal_motor.py src/dls_d4_following_scene.py scripts/dls_d4_teacher_takeover.py; do
+            RAW="https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/${GITHUB_SHA}/$path"
+            ok=0
+            for url in "https://gh-proxy.com/$RAW" "https://ghproxy.net/$RAW" "$RAW"; do
+              if curl -fLsS --connect-timeout 10 --max-time 90 "$url" -o "$WORK/$path"; then ok=1; break; fi
+            done
+            test "$ok" = 1
+            "$PY" -m py_compile "$WORK/$path"
+          done
+      - name: Verify 108 matching histories and teacher handoffs without model retraining
+        shell: bash
+        run: |
+          set -euo pipefail
+          WORK="$ROOT/tmp/dls-d4-takeover-${GITHUB_RUN_ID}"
+          declare -a pids=()
+          declare -a names=()
+          for variant in A B C; do
+            for seed in 42 43 44; do
+              name="$variant-seed$seed"
+              "$PY" "$WORK/scripts/dls_d4_teacher_takeover.py" --variant "$variant" --seed "$seed" > "$WORK/$name.log" 2>&1 &
+              pids+=("$!")
+              names+=("$name")
+            done
+          done
+          failed=0
+          for i in "${!pids[@]}"; do
+            if wait "${pids[$i]}"; then
+              echo "TAKEOVER PASS ${names[$i]}"
+              tail -4 "$WORK/${names[$i]}.log"
+            else
+              echo "TAKEOVER FAIL ${names[$i]}"
+              tail -80 "$WORK/${names[$i]}.log"
+              failed=1
+            fi
+          done
+          test "$failed" = 0
+      - name: Analyze recoverability: safe arrivals with and without privileged intervention
+        shell: bash
+        run: |
+          set -euo pipefail
+          "$PY" - <<'PY'
+          import json
+          from pathlib import Path
+          ROOT=Path("/mnt/datasets/lxb/dls/reports/d4-dynamic-follow-v1-44481405397/takeover-budget80")
+          OUTPUT=ROOT/"aggregate.json"
+          assert not OUTPUT.exists()
+          groups={}
+          for variant in ("A","B","C"):
+              records=[]
+              for seed in (42,43,44):
+                  f=ROOT/f"{variant}-seed{seed}.json"
+                  run=json.loads(f.read_text())
+                  assert run["variant"]==variant and run["model_seed"]==seed
+                  assert len(run["results"])==12
+                  assert all(r["same_pre_event_physical_and_action_prefix"] for r in run["results"])
+                  records.extend(run["results"])
+              groups[variant]={
+                  "cases":len(records),
+                  "baseline_safe_arrivals":sum(r["baseline_safe_arrival"] for r in records),
+                  "teacher_takeover_safe_arrivals":sum(r["safe_arrival"] for r in records),
+                  "baseline_collision_count":sum(r["baseline_collision"] for r in records),
+                  "teacher_takeover_collision_count":sum(r["collision"] for r in records),
+                  "takeover_saves_previously_unsafe":sum(
+                      not r["baseline_safe_arrival"] and r["safe_arrival"] for r in records),
+                  "takeover_worsens_previously_safe":sum(
+                      r["baseline_safe_arrival"] and not r["safe_arrival"] for r in records),
+                  "mean_takeover_min_surface_gap_m":sum(r["min_surface_gap_m"] for r in records)/len(records),
+                  "by_seed":{str(seed):{
+                      "baseline_safe":sum(r["baseline_safe_arrival"] for r in records if r["seed"]//0==0) if False else None
+                  } for seed in ()},
+              }
+              del groups[variant]["by_seed"]
+          result={
+              "stage":"D4 exact-prefix post-emergency takeover recoverability",
+              "cases":108,"data_id":"d4-dynamic-follow-v1-44481405397",
+              "policy_training_epochs":80,
+              "privileged_after_event":True,
+              "purpose":"separate unavoidable pre-event unsafe conditions from inadequate post-event sensor-to-action responses",
+              "results":groups,
+          }
+          OUTPUT.write_text(json.dumps(result,indent=2,ensure_ascii=False))
+          print(json.dumps(result,indent=2,ensure_ascii=False),flush=True)
+          PY
+          printf '%s\n' "## DLS D4 event-time recoverability" >> "$GITHUB_STEP_SUMMARY"
+          printf '%s\n' "108 paired physical emergency cases, exact matched pre-event model history; causal privileged teacher takeover." >> "$GITHUB_STEP_SUMMARY"
