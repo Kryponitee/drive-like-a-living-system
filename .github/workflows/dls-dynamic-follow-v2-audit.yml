@@ -1,0 +1,55 @@
+name: DLS dynamic-follow physically matched braking causal response audit
+
+on:
+  push:
+    paths:
+      - .github/workflows/dls-dynamic-follow-v2-audit.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: dls-dynamic-follow-v2-audit
+  cancel-in-progress: false
+
+jobs:
+  evaluate-contrast:
+    runs-on: [self-hosted, Linux, X64]
+    timeout-minutes: 10
+    env:
+      ROOT: /mnt/datasets/lxb/dls
+      DLS_ENV: /home/ps/miniconda3/envs/dls-p0
+      PYTHONNOUSERSITE: "1"
+      OMP_NUM_THREADS: "1"
+      OPENBLAS_NUM_THREADS: "1"
+    steps:
+      - name: Verify source observations and no existing result
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(findmnt -n -o TARGET -T "$ROOT")" = "/mnt/datasets"
+          OUTPUT="$ROOT/reports/d1-longitudinal-v1-44117653285/dynamic-follow-v2"
+          test -s "$OUTPUT/aggregate.json"
+          test ! -e "$OUTPUT/paired-mechanism-audit.json"
+          for variant in A B C; do
+            for seed in 42 43 44; do
+              test -s "$OUTPUT/$variant-seed$seed.json"
+            done
+          done
+      - name: Fetch and execute frozen-record physical counterfactual audit
+        shell: bash
+        run: |
+          set -euo pipefail
+          WORK="$ROOT/tmp/dls-dynamic-pair-audit-${GITHUB_RUN_ID}"
+          mkdir -p "$WORK"
+          RAW="https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/${GITHUB_SHA}/scripts/dls_dynamic_following_v2_audit.py"
+          ok=0
+          for url in "https://gh-proxy.com/$RAW" "https://ghproxy.net/$RAW" "$RAW"; do
+            if curl -fLsS --connect-timeout 10 --max-time 60 "$url" -o "$WORK/audit.py"; then ok=1; break; fi
+          done
+          test "$ok" = 1
+          "$DLS_ENV/bin/python" -m py_compile "$WORK/audit.py"
+          "$DLS_ENV/bin/python" "$WORK/audit.py"
+          printf '%s\n' "## Matched-history braking mechanism audit" >> "$GITHUB_STEP_SUMMARY"
+          printf '%s\n' "18 frozen-controller physical pairs with identical states and actions for steps 0..69; lead braking physical speed and module output responses verified at 90..99." >> "$GITHUB_STEP_SUMMARY"
