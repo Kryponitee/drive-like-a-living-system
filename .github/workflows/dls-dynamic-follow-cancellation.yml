@@ -1,0 +1,51 @@
+name: DLS dynamic following module readout cancellation audit
+
+on:
+  push:
+    paths:
+      - .github/workflows/dls-dynamic-follow-cancellation.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: dls-dynamic-follow-cancellation
+  cancel-in-progress: false
+
+jobs:
+  audit:
+    runs-on: [self-hosted, Linux, X64]
+    timeout-minutes: 10
+    env:
+      ROOT: /mnt/datasets/lxb/dls
+      DLS_ENV: /home/ps/miniconda3/envs/dls-p0
+      PYTHONNOUSERSITE: "1"
+      OMP_NUM_THREADS: "1"
+      OPENBLAS_NUM_THREADS: "1"
+    steps:
+      - name: Verify frozen paired input records
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(findmnt -n -o TARGET -T "$ROOT")" = "/mnt/datasets"
+          P="$ROOT/reports/d1-longitudinal-v1-44117653285/dynamic-follow-v2"
+          test -s "$P/paired-mechanism-audit.json"
+          test -s "$P/observation-visibility-seed41001.json"
+          test ! -e "$P/readout-cancellation-audit.json"
+      - name: Fetch pinned module decomposition audit and execute
+        shell: bash
+        run: |
+          set -euo pipefail
+          WORK="$ROOT/tmp/dls-cancel-${GITHUB_RUN_ID}"
+          mkdir -p "$WORK"
+          RAW="https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/${GITHUB_SHA}/scripts/dls_dynamic_following_cancellation_audit.py"
+          ok=0
+          for url in "https://gh-proxy.com/$RAW" "https://ghproxy.net/$RAW" "$RAW"; do
+            if curl -fLsS --connect-timeout 10 --max-time 60 "$url" -o "$WORK/audit.py"; then ok=1; break; fi
+          done
+          test "$ok" = 1
+          "$DLS_ENV/bin/python" -m py_compile "$WORK/audit.py"
+          "$DLS_ENV/bin/python" "$WORK/audit.py"
+          printf '%s\n' "## Model readout cancellation" >> "$GITHUB_STEP_SUMMARY"
+          printf '%s\n' "Pairwise sudden-braking module output logit movements and cancellation quantified for frozen B/C." >> "$GITHUB_STEP_SUMMARY"
