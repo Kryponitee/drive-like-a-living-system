@@ -1,0 +1,59 @@
+name: DLS D4 varying-lead teacher feasibility preflight
+
+on:
+  push:
+    paths:
+      - .github/workflows/dls-d4-teacher-preflight.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: dls-d4-teacher-preflight
+  cancel-in-progress: false
+
+jobs:
+  check:
+    runs-on: [self-hosted, Linux, X64]
+    timeout-minutes: 20
+    env:
+      ROOT: /mnt/datasets/lxb/dls
+      DLS_ENV: /home/ps/miniconda3/envs/dls-p0
+      TMPDIR: /mnt/datasets/lxb/dls/tmp
+      XDG_CACHE_HOME: /mnt/datasets/lxb/dls/cache/xdg
+      PYTHONNOUSERSITE: "1"
+      OMP_NUM_THREADS: "1"
+      OPENBLAS_NUM_THREADS: "1"
+      MKL_NUM_THREADS: "1"
+    steps:
+      - name: Require existing environment and unused report path
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(findmnt -n -o TARGET -T "$ROOT")" = "/mnt/datasets"
+          test -x "$DLS_ENV/bin/python"
+          test ! -e "$ROOT/reports/d4-following-preflight/teacher-coverage-v1.json"
+      - name: Fetch SHA pinned D4 preflight and existing adapter
+        shell: bash
+        run: |
+          set -euo pipefail
+          WORK="$ROOT/tmp/dls-d4-preflight-${GITHUB_RUN_ID}"
+          mkdir -p "$WORK/src" "$WORK/scripts"
+          for path in src/dls_dual_pedal_adapter.py src/dls_d4_following_scene.py scripts/dls_d4_teacher_preflight.py; do
+            RAW="https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/${GITHUB_SHA}/$path"
+            ok=0
+            for url in "https://gh-proxy.com/$RAW" "https://ghproxy.net/$RAW" "$RAW"; do
+              if curl -fLsS --connect-timeout 10 --max-time 60 "$url" -o "$WORK/$path"; then ok=1; break; fi
+            done
+            test "$ok" = 1
+            "$DLS_ENV/bin/python" -m py_compile "$WORK/$path"
+          done
+      - name: Execute 18 real MetaDrive teacher runs with three pressure types
+        shell: bash
+        run: |
+          set -euo pipefail
+          WORK="$ROOT/tmp/dls-d4-preflight-${GITHUB_RUN_ID}"
+          "$DLS_ENV/bin/python" "$WORK/scripts/dls_d4_teacher_preflight.py"
+          printf '%s\n' "## DLS D4 teacher preflight" >> "$GITHUB_STEP_SUMMARY"
+          printf '%s\n' "18 physical MetaDrive following runs; stop if any collisions or lead events never reached; JSON under reports/d4-following-preflight." >> "$GITHUB_STEP_SUMMARY"
