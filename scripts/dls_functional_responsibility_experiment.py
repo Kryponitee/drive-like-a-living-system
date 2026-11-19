@@ -182,6 +182,7 @@ def main():
     parser=argparse.ArgumentParser()
     parser.add_argument("--seed",type=int,choices=(7,8,9),required=True)
     parser.add_argument("--output",type=Path,required=True)
+    parser.add_argument("--checkpoint-dir",type=Path,required=True)
     args=parser.parse_args()
     torch.set_num_threads(1)
     assert not args.output.exists()
@@ -202,8 +203,17 @@ def main():
     ):
         model,epoch,val = train(args.seed,task,communication,fault_training,
                                 train_x,val_x)
-        rows.append(summarize_run(args.seed,task,communication,fault_training,
-                                  model,test_x,donor,epoch,val))
+        ckpt = args.checkpoint_dir / f"{task}-comm{int(communication)}-fault{int(fault_training)}-seed{args.seed}.pt"
+        assert not ckpt.exists()
+        args.checkpoint_dir.mkdir(parents=True,exist_ok=True)
+        torch.save({"state_dict":model.state_dict(),
+                    "architecture":"ComputationalResponsibilityRouter(4,4,32,6,2,balanced_access=True)",
+                    "training_seed":args.seed, "task":task, "communication":communication,
+                    "fault_training":fault_training, "epochs":25},ckpt)
+        row=summarize_run(args.seed,task,communication,fault_training,
+                          model,test_x,donor,epoch,val)
+        row["checkpoint"]=str(ckpt)
+        rows.append(row)
     output={
         "stage":"DLS functional responsibility audit v1",
         "seed":args.seed,
