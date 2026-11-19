@@ -1,0 +1,50 @@
+name: DLS D6 emergency-braking supervision frequency audit
+
+on:
+  push:
+    paths:
+      - .github/workflows/dls-d6-critical-action-audit.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: dls-d6-critical-action-audit
+  cancel-in-progress: false
+
+jobs:
+  audit:
+    runs-on: [self-hosted, Linux, X64]
+    timeout-minutes: 10
+    env:
+      ROOT: /mnt/datasets/lxb/dls
+      PY: /home/ps/miniconda3/envs/dls-p0/bin/python
+      DATA_ID: d4-dynamic-follow-v1-44481405397
+      OMP_NUM_THREADS: "1"
+      OPENBLAS_NUM_THREADS: "1"
+    steps:
+      - name: Verify unique audit and original immutable physical demonstration archives
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(findmnt -n -o TARGET -T "$ROOT")" = "/mnt/datasets"
+          test -s "$ROOT/reports/$DATA_ID/d6-a-pilot/coverage-vs-replay-summary.json"
+          test -s "$ROOT/demonstrations/$DATA_ID/d6-online-coverage-v0.npz"
+          test ! -e "$ROOT/reports/$DATA_ID/d6-a-pilot/braking-target-frequency.json"
+      - name: Run privileged-label distribution audit without modifying any neural models
+        shell: bash
+        run: |
+          set -euo pipefail
+          WORK="$ROOT/tmp/dls-brake-audit-${GITHUB_RUN_ID}"
+          mkdir -p "$WORK"
+          RAW="https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/${GITHUB_SHA}/scripts/dls_d6_brake_label_audit.py"
+          ok=0
+          for url in "https://gh-proxy.com/$RAW" "https://ghproxy.net/$RAW" "$RAW"; do
+            if curl -fLsS --connect-timeout 10 --max-time 90 "$url" -o "$WORK/audit.py"; then ok=1; break; fi
+          done
+          test "$ok" = 1
+          "$PY" -m py_compile "$WORK/audit.py"
+          "$PY" "$WORK/audit.py"
+          printf '%s\n' "## Critical braking label audit" >> "$GITHUB_STEP_SUMMARY"
+          printf '%s\n' "Brake-target active/severe rates in original D4 expert demonstrations and D6 learner-visited state labels." >> "$GITHUB_STEP_SUMMARY"
