@@ -68,3 +68,5 @@ jobs:
           PY
           printf '%s\n' "## Dynamic following physical feasibility" >> "$GITHUB_STEP_SUMMARY"
           printf '%s\n' "Controlled lead model has nontrivial measured speed changes in actual MetaDrive physics; recorded physical distances and phase labels." >> "$GITHUB_STEP_SUMMARY"
+
+# Re-run after wrapper engine access correction.
