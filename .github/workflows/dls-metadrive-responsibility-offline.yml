@@ -1,0 +1,127 @@
+name: DLS D1-prime real MetaDrive temporal responsibility audit
+
+on:
+  push:
+    paths:
+      - .github/workflows/dls-metadrive-responsibility-offline.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: dls-metadrive-responsibility-offline-v1
+  cancel-in-progress: false
+
+jobs:
+  audit:
+    runs-on: [self-hosted, Linux, X64]
+    timeout-minutes: 35
+    env:
+      ROOT: /mnt/datasets/lxb/dls
+      DLS_ENV: /home/ps/miniconda3/envs/dls-p0
+      OMP_NUM_THREADS: "1"
+      OPENBLAS_NUM_THREADS: "1"
+      MKL_NUM_THREADS: "1"
+      PYTHONNOUSERSITE: "1"
+    steps:
+      - name: Verify models and held-out MetaDrive observation archives
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(findmnt -n -o TARGET -T "$ROOT")" = "/mnt/datasets"
+          for variant in B C; do
+            for seed in 42 43 44; do
+              test -s "$ROOT/checkpoints/d1-longitudinal-v1-44117653285/$variant-seed$seed.pt"
+              test ! -e "$ROOT/reports/d1-longitudinal-v1-44117653285/responsibility-offline-v1/$variant-seed$seed.json"
+            done
+          done
+          for density in 0.00 0.10 0.25; do
+            test -s "$ROOT/demonstrations/d1-longitudinal-v1-44117653285/test/density-$density.npz"
+          done
+      - name: Fetch pinned source and audit files
+        shell: bash
+        run: |
+          set -euo pipefail
+          WORK="$ROOT/tmp/dls-offline-audit-${GITHUB_RUN_ID}"
+          mkdir -p "$WORK/src" "$WORK/scripts"
+          for path in src/dls_longitudinal_motor.py src/dls_metadrive_responsibility_adapter.py scripts/dls_metadrive_offline_responsibility.py; do
+            RAW="https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/${GITHUB_SHA}/$path"
+            ok=0
+            for url in "https://gh-proxy.com/$RAW" "https://ghproxy.net/$RAW" "$RAW"; do
+              if curl -fLsS --connect-timeout 10 --max-time 60 "$url" -o "$WORK/$path"; then ok=1; break; fi
+            done
+            test "$ok" = 1
+            "$DLS_ENV/bin/python" -m py_compile "$WORK/$path"
+          done
+      - name: Run six frozen B and C model audits over untouched test data
+        shell: bash
+        run: |
+          set -euo pipefail
+          WORK="$ROOT/tmp/dls-offline-audit-${GITHUB_RUN_ID}"
+          declare -a pids=()
+          declare -a names=()
+          for variant in B C; do
+            for seed in 42 43 44; do
+              name="$variant-seed$seed"
+              "$DLS_ENV/bin/python" "$WORK/scripts/dls_metadrive_offline_responsibility.py" \
+                --variant "$variant" --seed "$seed" --episodes-per-density 2 --max-steps 160 \
+                > "$WORK/$name.log" 2>&1 &
+              pids+=("$!")
+              names+=("$name")
+            done
+          done
+          failed=0
+          for i in "${!pids[@]}"; do
+            if wait "${pids[$i]}"; then
+              echo "PASS ${names[$i]}"
+              tail -7 "$WORK/${names[$i]}.log"
+            else
+              echo "FAIL ${names[$i]}"
+              tail -100 "$WORK/${names[$i]}.log"
+              failed=1
+            fi
+          done
+          test "$failed" = 0
+      - name: Verify reports and summarize
+        shell: bash
+        run: |
+          set -euo pipefail
+          "$DLS_ENV/bin/python" - <<'PY'
+          import json
+          from pathlib import Path
+          import numpy as np
+          root=Path("/mnt/datasets/lxb/dls/reports/d1-longitudinal-v1-44117653285/responsibility-offline-v1")
+          output=root/"aggregate.json"
+          assert not output.exists()
+          results={}
+          for variant in ("B","C"):
+              files=[]
+              for seed in (42,43,44):
+                  record=json.loads((root/f"{variant}-seed{seed}.json").read_text())
+                  assert record["num_observed_episodes"]==6
+                  assert 0<record["total_observed_steps"]<=960
+                  assert len(record["experiments"])==6
+                  assert all(np.isfinite(r["mse"]) for r in record["experiments"])
+                  files.append(record)
+              results[variant]={
+                  "total_episodes":sum(r["num_observed_episodes"] for r in files),
+                  "total_replay_steps":sum(r["total_observed_steps"] for r in files),
+                  "mean_teacher_mse":float(np.mean([r["weighted_mse"] for r in files])),
+                  "mean_one_step_message_block_delta_mse":float(np.mean([r["weighted_one_step_message_block_loss_increase"] for r in files])),
+                  "by_seed":{str(r["training_seed"]):{
+                      "mse":r["weighted_mse"],
+                      "message_delta":r["weighted_one_step_message_block_loss_increase"]
+                  } for r in files}
+              }
+          result={
+              "stage":"DLS D1-prime frozen real observation functional responsibility",
+              "scope":"already archived MetaDrive held-out episodes; no retrain, no resimulation, no shuffled sensor counterfactual",
+              "notes":"B self-message and C peer-message architectures differ; one-step same-hidden-state blockade does not measure causal closed-loop reliance",
+              "results":results,
+          }
+          output.write_text(json.dumps(result,indent=2,ensure_ascii=False))
+          print(json.dumps(result,indent=2,ensure_ascii=False))
+          PY
+          printf '%s\n' "## DLS frozen real MetaDrive responsibility audit" >> "$GITHUB_STEP_SUMMARY"
+          printf '%s\n' "6 existing checkpoints; 36 held-out episode prefixes; reports in responsibility-offline-v1" >> "$GITHUB_STEP_SUMMARY"
