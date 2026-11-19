@@ -1,0 +1,111 @@
+name: DLS D5 real 259D sensor-state observability audit
+
+on:
+  push:
+    paths:
+      - .github/workflows/dls-d5-observability.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: dls-d5-observability
+  cancel-in-progress: false
+
+jobs:
+  evaluate:
+    runs-on: [self-hosted, Linux, X64]
+    timeout-minutes: 100
+    env:
+      ROOT: /mnt/datasets/lxb/dls
+      PY: /home/ps/miniconda3/envs/dls-p0/bin/python
+      TMPDIR: /mnt/datasets/lxb/dls/tmp
+      XDG_CACHE_HOME: /mnt/datasets/lxb/dls/cache/xdg
+      PYTHONNOUSERSITE: "1"
+      OMP_NUM_THREADS: "1"
+      OPENBLAS_NUM_THREADS: "1"
+      MKL_NUM_THREADS: "1"
+      NUMEXPR_NUM_THREADS: "1"
+      DATA_ID: d4-dynamic-follow-v1-44481405397
+    steps:
+      - name: Verify D4 checkpoints and reference data mounted and no stale D5 report
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(findmnt -n -o TARGET -T "$ROOT")" = "/mnt/datasets"
+          test -s "$ROOT/reports/$DATA_ID/d4-fullseq80-overview.json"
+          test -s "$ROOT/reports/$DATA_ID/d4-budget80-outcome-audit.json"
+          test -s "$ROOT/reports/$DATA_ID/takeover-budget80/aggregate.json"
+          test -s "$ROOT/demonstrations/$DATA_ID/train.npz"
+          test -s "$ROOT/demonstrations/$DATA_ID/val.npz"
+          test ! -e "$ROOT/reports/$DATA_ID/d5-observability-v1/sensor-decodability-report.json"
+          for variant in A B C; do
+            test -s "$ROOT/checkpoints/$DATA_ID/full-seq80/$variant-seed42.pt"
+          done
+          "$PY" - <<'PY'
+          import torch
+          assert torch.cuda.is_available()
+          print("Available GPUs:",torch.cuda.device_count())
+          PY
+      - name: Fetch SHA-pinned source and scientific audit scripts
+        shell: bash
+        run: |
+          set -euo pipefail
+          WORK="$ROOT/tmp/dls-d5-observability-${GITHUB_RUN_ID}"
+          mkdir -p "$WORK/src" "$WORK/scripts"
+          for path in src/dls_dual_pedal_adapter.py src/dls_longitudinal_motor.py src/dls_d4_following_scene.py scripts/dls_d5_observability_data.py scripts/dls_d5_sensor_probe.py; do
+            RAW="https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/${GITHUB_SHA}/$path"
+            ok=0
+            for url in "https://gh-proxy.com/$RAW" "https://ghproxy.net/$RAW" "$RAW"; do
+              if curl -fLsS --connect-timeout 10 --max-time 90 "$url" -o "$WORK/$path"; then ok=1; break; fi
+            done
+            test "$ok" = 1
+            "$PY" -m py_compile "$WORK/$path"
+            sha256sum "$WORK/$path"
+          done
+      - name: Reconstruct exact train val and test physical labels from original D4 teacher
+        shell: bash
+        run: |
+          set -euo pipefail
+          WORK="$ROOT/tmp/dls-d5-observability-${GITHUB_RUN_ID}"
+          for split in train val test; do
+            "$PY" "$WORK/scripts/dls_d5_observability_data.py" --stage "$split"
+          done
+      - name: Independently record 259D input and true physics under learned A/B/C closed-loop
+        shell: bash
+        run: |
+          set -euo pipefail
+          WORK="$ROOT/tmp/dls-d5-observability-${GITHUB_RUN_ID}"
+          declare -a pids=()
+          for variant in A B C; do
+            "$PY" "$WORK/scripts/dls_d5_observability_data.py" --stage "onpolicy-$variant" > "$WORK/onpolicy-$variant.log" 2>&1 &
+            pids+=("$!")
+          done
+          failed=0
+          for i in "${!pids[@]}"; do
+            if wait "${pids[$i]}"; then
+              echo "ONPOLICY PASS index=$i"
+            else
+              echo "ONPOLICY FAIL index=$i"
+              failed=1
+            fi
+            case "$i" in
+              0) name=A ;;
+              1) name=B ;;
+              2) name=C ;;
+            esac
+            tail -10 "$WORK/onpolicy-$name.log"
+          done
+          test "$failed" = 0
+      - name: Compare time-only vs raw sensor vs short temporal sensor history decoding
+        shell: bash
+        run: |
+          set -euo pipefail
+          WORK="$ROOT/tmp/dls-d5-observability-${GITHUB_RUN_ID}"
+          "$PY" "$WORK/scripts/dls_d5_sensor_probe.py"
+          test -s "$ROOT/reports/$DATA_ID/d5-observability-v1/sensor-decodability-report.json"
+          printf '%s\n' "## DLS D5 observational information gate" >> "$GITHUB_STEP_SUMMARY"
+          printf '%s\n' "72 teacher train episodes, 24 val, 36 heldout teacher, 36 heldout on-policy episodes, disjoint scene seeds; lead gap and relative speed decoding using ordinary 259D input." >> "$GITHUB_STEP_SUMMARY"
+          printf '%s\n' "Negative control uses only elapsed time and privileged ego speed, no leader state." >> "$GITHUB_STEP_SUMMARY"
+          printf '%s\n' "Report: $ROOT/reports/$DATA_ID/d5-observability-v1/sensor-decodability-report.json" >> "$GITHUB_STEP_SUMMARY"
