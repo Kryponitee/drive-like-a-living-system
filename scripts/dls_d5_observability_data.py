@@ -23,13 +23,14 @@ MODES=("pulse","mild","sham")
 
 
 def package(episodes):
-    obs=[];targets=[];times=[];events=[];offsets=[0];meta=[]
+    obs=[];targets=[];times=[];events=[];ego_speeds=[];offsets=[0];meta=[]
     for x,physics,rec in episodes:
         assert x.ndim==2 and x.shape[1]==259
         assert physics.shape==(len(x),4)
         obs.append(x.astype(np.float32))
         # gap (m), longitudinal closing speed (m/s).
         targets.append(np.column_stack([physics[:,0],physics[:,1]-physics[:,2]]).astype(np.float32))
+        ego_speeds.append(physics[:,1].astype(np.float32))
         times.append(np.arange(len(x),dtype=np.float32))
         events.append(np.full(len(x),rec["brake_start_step"],dtype=np.float32))
         offsets.append(offsets[-1]+len(x))
@@ -39,6 +40,9 @@ def package(episodes):
         "labels":np.concatenate(targets),
         "times":np.concatenate(times),
         "event_steps":np.concatenate(events),
+        "ego_speeds":np.concatenate(ego_speeds),
+        "episode_modes":np.asarray([MODES.index(m["mode"]) for m in meta],dtype=np.int8),
+        "episode_seeds":np.asarray([m["seed"] for m in meta],dtype=np.int32),
         "episode_offsets":np.asarray(offsets,dtype=np.int64),
         "meta":meta,
     }
