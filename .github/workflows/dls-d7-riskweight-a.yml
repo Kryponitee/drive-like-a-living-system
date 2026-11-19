@@ -1,0 +1,180 @@
+name: DLS D7 critical brake loss weight controlled A-model experiment
+
+on:
+  push:
+    paths:
+      - .github/workflows/dls-d7-riskweight-a.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: dls-d7-riskweight-a
+  cancel-in-progress: false
+
+jobs:
+  evaluate:
+    runs-on: [self-hosted, Linux, X64]
+    timeout-minutes: 50
+    env:
+      ROOT: /mnt/datasets/lxb/dls
+      DATA_ID: d4-dynamic-follow-v1-44481405397
+      PY: /home/ps/miniconda3/envs/dls-p0/bin/python
+      TMPDIR: /mnt/datasets/lxb/dls/tmp
+      XDG_CACHE_HOME: /mnt/datasets/lxb/dls/cache/xdg
+      PYTHONNOUSERSITE: "1"
+      OMP_NUM_THREADS: "1"
+      OPENBLAS_NUM_THREADS: "1"
+      MKL_NUM_THREADS: "1"
+      NUMEXPR_NUM_THREADS: "1"
+    steps:
+      - name: Verify frozen D6 same-data control and no previous risk-weighted results
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(findmnt -n -o TARGET -T "$ROOT")" = "/mnt/datasets"
+          test -s "$ROOT/reports/$DATA_ID/d6-a-pilot/coverage-vs-replay-summary.json"
+          test -s "$ROOT/reports/$DATA_ID/d6-a-pilot/braking-target-frequency.json"
+          test -s "$ROOT/demonstrations/$DATA_ID/d6-online-coverage-v0.npz"
+          test ! -e "$ROOT/reports/$DATA_ID/d7-a-riskweight/comparison-summary.json"
+          test ! -e "$ROOT/checkpoints/$DATA_ID/d7-a-riskweight/riskweighted-seed42.pt"
+          "$PY" - <<'PY'
+          import torch
+          assert torch.cuda.is_available()
+          print("GPU count",torch.cuda.device_count())
+          PY
+      - name: Fetch immutable D4 environment and D7 one-variable training intervention
+        shell: bash
+        run: |
+          set -euo pipefail
+          WORK="$ROOT/tmp/dls-d7-risk-${GITHUB_RUN_ID}"
+          mkdir -p "$WORK/src" "$WORK/scripts"
+          for path in src/dls_longitudinal_motor.py src/dls_dual_pedal_adapter.py src/dls_d4_following_scene.py scripts/dls_d4_eval_fullseq80.py scripts/dls_d7_train_a_riskweight.py scripts/dls_d7_eval_a_riskweight.py; do
+            RAW="https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/${GITHUB_SHA}/$path"
+            ok=0
+            for url in "https://gh-proxy.com/$RAW" "https://ghproxy.net/$RAW" "$RAW"; do
+              if curl -fLsS --connect-timeout 10 --max-time 90 "$url" -o "$WORK/$path"; then ok=1; break; fi
+            done
+            test "$ok" = 1
+            "$PY" -m py_compile "$WORK/$path"
+          done
+      - name: Train 3 identical A networks with only high-brake target loss reweighting
+        shell: bash
+        run: |
+          set -euo pipefail
+          WORK="$ROOT/tmp/dls-d7-risk-${GITHUB_RUN_ID}"
+          GPUS="$("$PY" -c 'import torch; print(torch.cuda.device_count())')"
+          declare -a pids=()
+          for seed in 42 43 44; do
+            gpu=$(( (seed-42) % GPUS ))
+            "$PY" "$WORK/scripts/dls_d7_train_a_riskweight.py" --arm riskweighted --seed "$seed" --gpu "$gpu" > "$WORK/train-seed$seed.log" 2>&1 &
+            pids+=("$!")
+          done
+          failed=0
+          for i in "${!pids[@]}"; do
+            seed=$((i+42))
+            if wait "${pids[$i]}"; then
+              echo "D7 TRAIN PASS seed=$seed"
+              tail -5 "$WORK/train-seed$seed.log"
+            else
+              echo "D7 TRAIN FAIL seed=$seed"
+              tail -100 "$WORK/train-seed$seed.log"
+              failed=1
+            fi
+          done
+          test "$failed" = 0
+      - name: Test critical loss effect on identical 12 heldout physical seeds and sham matches
+        shell: bash
+        run: |
+          set -euo pipefail
+          WORK="$ROOT/tmp/dls-d7-risk-${GITHUB_RUN_ID}"
+          declare -a pids=()
+          for seed in 42 43 44; do
+            "$PY" "$WORK/scripts/dls_d7_eval_a_riskweight.py" --arm riskweighted --seed "$seed" > "$WORK/eval-seed$seed.log" 2>&1 &
+            pids+=("$!")
+          done
+          failed=0
+          for i in "${!pids[@]}"; do
+            seed=$((i+42))
+            if wait "${pids[$i]}"; then
+              echo "D7 EVAL PASS seed=$seed"
+              tail -5 "$WORK/eval-seed$seed.log"
+            else
+              echo "D7 EVAL FAIL seed=$seed"
+              tail -100 "$WORK/eval-seed$seed.log"
+              failed=1
+            fi
+          done
+          test "$failed" = 0
+      - name: Compare safe arrivals with exactly matched D6 onpolicy loss baseline
+        shell: bash
+        run: |
+          set -euo pipefail
+          "$PY" - <<'PY'
+          import json
+          from pathlib import Path
+          from statistics import mean
+          base=Path("/mnt/datasets/lxb/dls/reports/d4-dynamic-follow-v1-44481405397")
+          old=base/"d6-a-pilot"
+          new=base/"d7-a-riskweight"
+          out=new/"comparison-summary.json"
+          assert not out.exists()
+          def safe(x):
+              return bool(x["success"] and not x["collision"] and not x["out_of_road"])
+          def collect(path,arm):
+              allcases={}
+              vals=[]
+              for seed in (42,43,44):
+                  train=json.loads((path/f"train-{arm}-seed{seed}.json").read_text())
+                  assert train["seed"]==seed and train["train_episodes"]==180
+                  assert train["optimizer_updates_per_epoch"]==12 and train["epochs"]==80
+                  vals.append(train["best_val_huber"])
+                  test=json.loads((path/"evaluation"/f"{arm}-seed{seed}.json").read_text())
+                  assert test["matched_pulse_sham_prefixes"]==12
+                  for rec in test["episodes"]:
+                      key=f"{seed}-{rec['seed']}-{rec['mode']}"
+                      assert key not in allcases
+                      allcases[key]=rec
+              assert len(allcases)==72
+              groups={}
+              for mode in ("sham","pulse"):
+                  sample=[x for x in allcases.values() if x["mode"]==mode]
+                  groups[mode]={
+                      "cases":len(sample),
+                      "safe_arrivals":sum(safe(x) for x in sample),
+                      "collisions":sum(x["collision"] for x in sample),
+                      "mean_post_event_brake_activity":mean([
+                          x["brake_fraction_after_event"] for x in sample
+                          if x["brake_fraction_after_event"] is not None]),
+                      "mean_min_surface_gap_m":mean(x["min_surface_gap_m"] for x in sample),
+                  }
+              return allcases,groups,vals
+          oldcases,oldgroups,oldval=collect(old,"onpolicy")
+          newcases,newgroups,newval=collect(new,"riskweighted")
+          assert set(oldcases)==set(newcases)
+          keys=[k for k in oldcases if k.endswith("-pulse")]
+          assert len(keys)==36
+          gain=sum(not safe(oldcases[k]) and safe(newcases[k]) for k in keys)
+          loss=sum(safe(oldcases[k]) and not safe(newcases[k]) for k in keys)
+          report={
+              "stage":"DLS D7 only sample-risk-weight change in onpolicy A imitation",
+              "same_scene_seed_and_architecture_and_training_update_count":True,
+              "no_new_train_labels":True,
+              "teacher_brake_threshold":0.5,
+              "critical_brake_loss_multiplier":7.,
+              "D6_unweighted":{"closed_loop":oldgroups,"mean_val_huber":mean(oldval)},
+              "D7_weighted":{"closed_loop":newgroups,"mean_val_huber":mean(newval)},
+              "paired_differences":{
+                  "cases":len(keys),
+                  "gain":gain,
+                  "loss":loss,
+                  "net_extra_safe_arrivals":gain-loss,
+              },
+              "limitations":"D6 vs D7 only differs loss weighting; still 3 training seeds by 12 scenes and physics privileged teacher labels; no motor coordination claims",
+          }
+          out.write_text(json.dumps(report,indent=2,ensure_ascii=False))
+          print("D7_RESULT",json.dumps(report,indent=2,ensure_ascii=False),flush=True)
+          PY
+          printf '%s\n' "## D7 critical-brake loss weight A-only control" >> "$GITHUB_STEP_SUMMARY"
+          printf '%s\n' "A network, same D6 on-policy dataset, exact 80-epoch training updates, 3 seeds and 12 identical physical pulse/sham scenes. Only brake-target conditional sample loss multiplier (7x) changed." >> "$GITHUB_STEP_SUMMARY"
